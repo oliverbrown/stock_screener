@@ -4,12 +4,21 @@ Stock Screener — no API key required
 Pulls live data from Yahoo Finance via yfinance.
 Supports major indices: S&P 500, Dow 30, NASDAQ 100, Russell 2000.
 
+Signals:
+    Buy side  — undervalued (P/E / P/B vs sector), oversold (RSI < 35)
+    Sell side — overvalued (P/E vs sector, PEG > 2), overbought (RSI > 70),
+                overextended (>20% above the 200-day moving average)
+    Context   — 50/200-day trend, distance from 52-week high/low, and a
+                value-trap guard (high debt / negative margins) that
+                suppresses a stale "undervalued" call
+
+Every run is also written to a timestamped log file in ./logs/.
+
 Usage:
     python stock_screener.py                          # default watchlist
     python stock_screener.py --index sp500            # all S&P 500 stocks
-    python stock_screener.py --index dow30            # Dow Jones 30
+    python stock_screener.py --index dow30 --signal sell
     python stock_screener.py --index nasdaq100        # NASDAQ 100
-    python stock_screener.py --index russell2000      # Russell 2000
     python stock_screener.py --tickers AAPL MSFT TSLA
     python stock_screener.py --index sp500 --signal oversold --max-pe 20 --output report.html
     python stock_screener.py --list-indices           # show all available indices
@@ -33,6 +42,35 @@ try:
 except ImportError:
     print("Missing dependencies. Run:  pip install yfinance pandas")
     sys.exit(1)
+
+
+# ── Run logging ───────────────────────────────────────────────────────────────
+class _Tee:
+    """Fan writes out to several streams at once (console + log file)."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for s in self._streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
+
+
+def _open_run_log(log_dir: str = "logs"):
+    """Create ./logs (if needed) and open a uniquely named, timestamped log.
+    Returns (file_handle, path)."""
+    os.makedirs(log_dir, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path  = os.path.join(log_dir, f"screener_{stamp}.log")
+    n = 1
+    while os.path.exists(path):                       # same-second reruns
+        path = os.path.join(log_dir, f"screener_{stamp}_{n}.log")
+        n += 1
+    return open(path, "w", encoding="utf-8", buffering=1), path
 
 
 # ── Sector P/E benchmarks ─────────────────────────────────────────────────────
@@ -233,32 +271,96 @@ def fetch_stock(ticker: str) -> dict | None:
         price = info.get("currentPrice") or info.get("regularMarketPrice")
         if not price:
             return None
-        hist = t.history(period="1mo", auto_adjust=True)
+        hist = t.history(period="1y", auto_adjust=True)
         if hist.empty or len(hist) < 2:
             return None
-        rsi      = compute_rsi(hist["Close"])
-        change1d = round((hist["Close"].iloc[-1] / hist["Close"].iloc[-2] - 1) * 100, 2)
-        pe       = info.get("trailingPE") or info.get("forwardPE")
-        pb       = info.get("priceToBook")
+        close    = hist["Close"]
+        price    = float(price)
+        rsi      = compute_rsi(close)
+        change1d = round((close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
+
+        # ── Trend: 50 / 200-day moving averages ──────────────────────────────
+        ma50  = float(close.rolling(50).mean().iloc[-1])  if len(close) >= 50  else None
+        ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+        pct_vs_200 = round((price / ma200 - 1) * 100, 1) if ma200 else None
+        trend = None
+        if ma50 is not None and ma200 is not None:
+            trend = "up" if ma50 >= ma200 else "down"
+
+        # ── 52-week range position ──────────────────────────────────────────
+        wk_high = info.get("fiftyTwoWeekHigh")
+        wk_low  = info.get("fiftyTwoWeekLow")
+        pct_off_high = round((price / wk_high - 1) * 100, 1) if wk_high else None
+        pct_off_low  = round((price / wk_low  - 1) * 100, 1) if wk_low  else None
+
+        pe     = info.get("trailingPE") or info.get("forwardPE")
+        pb     = info.get("priceToBook")
+        peg    = info.get("trailingPegRatio") or info.get("pegRatio")
+        dte    = info.get("debtToEquity")          # already expressed as a percentage
+        margin = info.get("profitMargins")         # fraction, e.g. -0.05
+
         return {
-            "ticker":   ticker,
-            "name":     info.get("longName") or info.get("shortName", ticker),
-            "sector":   info.get("sector", "Unknown"),
-            "price":    round(float(price), 2),
-            "change1d": change1d,
-            "pe":       round(float(pe), 1) if pe else None,
-            "pb":       round(float(pb), 2) if pb else None,
-            "rsi":      rsi,
+            "ticker":       ticker,
+            "name":         info.get("longName") or info.get("shortName", ticker),
+            "sector":       info.get("sector", "Unknown"),
+            "price":        round(price, 2),
+            "change1d":     change1d,
+            "pe":           round(float(pe), 1)  if pe  else None,
+            "pb":           round(float(pb), 2)  if pb  else None,
+            "peg":          round(float(peg), 2) if peg else None,
+            "rsi":          rsi,
+            "ma50":         round(ma50, 2)  if ma50  is not None else None,
+            "ma200":        round(ma200, 2) if ma200 is not None else None,
+            "pct_vs_200":   pct_vs_200,
+            "trend":        trend,
+            "wk_high":      round(float(wk_high), 2) if wk_high else None,
+            "wk_low":       round(float(wk_low), 2)  if wk_low  else None,
+            "pct_off_high": pct_off_high,
+            "pct_off_low":  pct_off_low,
+            "debt_equity":  round(float(dte), 0)        if dte    is not None else None,
+            "margin":       round(float(margin) * 100, 1) if margin is not None else None,
         }
     except Exception:
         return None
 
 
 # ── Signal classifier ─────────────────────────────────────────────────────────
-def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, str]:
-    pe, pb, rsi, sector = stock["pe"], stock["pb"], stock["rsi"], stock["sector"]
-    is_oversold    = isinstance(rsi, float) and not pd.isna(rsi) and rsi < 35
-    sector_avg_pe  = SECTOR_PE.get(sector, DEFAULT_SECTOR_PE)
+# Atomic tags a stock can earn. The headline `signal` is derived from these.
+BUY_TAGS  = ("undervalued", "oversold")
+SELL_TAGS = ("overvalued", "overbought", "overextended")
+
+
+def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], str]:
+    pe, pb, peg   = stock["pe"], stock["pb"], stock["peg"]
+    rsi, sector   = stock["rsi"], stock["sector"]
+    dte           = stock["debt_equity"]
+    margin        = stock["margin"]
+    pct_vs_200    = stock["pct_vs_200"]
+    pct_off_high  = stock["pct_off_high"]
+    pct_off_low   = stock["pct_off_low"]
+
+    rsi_ok        = isinstance(rsi, float) and not pd.isna(rsi)
+    sector_avg_pe = SECTOR_PE.get(sector, DEFAULT_SECTOR_PE)
+
+    # ── Quality guards ──────────────────────────────────────────────────────
+    high_debt    = dte    is not None and dte    > 200          # debt/equity > 200%
+    unprofitable = margin is not None and margin < 0
+    quality_flags = []
+    if high_debt:
+        quality_flags.append(f"debt/equity {dte:.0f}%")
+    if unprofitable:
+        quality_flags.append(f"profit margin {margin:.1f}%")
+
+    # ── Momentum ───────────────────────────────────────────────────────────
+    is_oversold   = rsi_ok and rsi < 35
+    is_overbought = rsi_ok and rsi > 70
+
+    # ── Trend / extension ──────────────────────────────────────────────────
+    is_overextended = pct_vs_200 is not None and pct_vs_200 > 20
+    near_52w_high   = pct_off_high is not None and pct_off_high > -3
+    near_52w_low    = pct_off_low  is not None and pct_off_low  < 5
+
+    # ── Valuation ──────────────────────────────────────────────────────────
     is_undervalued = (
         (pe is not None and pe < sector_avg_pe * 0.80) or
         (pb is not None and pb < 1.5 and (pe is None or pe < sector_avg_pe))
@@ -266,6 +368,40 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, str]:
     if max_pe is not None and pe is not None and pe > max_pe:
         is_undervalued = False
 
+    is_overvalued = (
+        (pe is not None and pe > sector_avg_pe * 1.25) or
+        (peg is not None and peg > 2.0)
+    )
+
+    # A cheap stock with a broken balance sheet is a value trap, not a
+    # bargain — suppress the undervalued call and flag it instead.
+    value_trap = is_undervalued and (high_debt or unprofitable)
+    if value_trap:
+        is_undervalued = False
+
+    # ── Tags + headline signal ─────────────────────────────────────────────
+    tags = []
+    if is_undervalued:   tags.append("undervalued")
+    if is_oversold:      tags.append("oversold")
+    if is_overvalued:    tags.append("overvalued")
+    if is_overbought:    tags.append("overbought")
+    if is_overextended:  tags.append("overextended")
+
+    buy  = is_undervalued or is_oversold
+    sell = is_overvalued or is_overbought or is_overextended
+
+    if buy and sell:
+        signal = "mixed"
+    elif buy:
+        signal = "buy"  if (is_undervalued and is_oversold) else \
+                 "undervalued" if is_undervalued else "oversold"
+    elif sell:
+        signal = "sell" if (is_overvalued and (is_overbought or is_overextended)) else \
+                 "overvalued" if is_overvalued else "overbought"
+    else:
+        signal = "neutral"
+
+    # ── Thesis text ────────────────────────────────────────────────────────
     reasons = []
     if is_undervalued:
         parts = []
@@ -276,24 +412,44 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, str]:
         reasons.append("Undervalued: " + ", ".join(parts) + ".")
     if is_oversold:
         reasons.append(f"Oversold: RSI at {rsi} signals excess selling pressure.")
-    if not reasons:
-        reasons.append("No strong undervalued or oversold signal at current levels.")
+    if near_52w_low and not is_undervalued and signal != "neutral":
+        reasons.append(f"Trading {pct_off_low:+.0f}% from its 52-week low.")
 
-    if is_undervalued and is_oversold:
-        signal = "both"
-    elif is_undervalued:
-        signal = "undervalued"
-    elif is_oversold:
-        signal = "oversold"
-    else:
-        signal = "neutral"
-    return signal, " ".join(reasons)
+    if is_overvalued:
+        parts = []
+        if pe is not None and pe > sector_avg_pe * 1.25:
+            parts.append(f"P/E {pe}x vs sector avg ~{sector_avg_pe}x")
+        if peg is not None and peg > 2.0:
+            parts.append(f"PEG {peg}x")
+        reasons.append("Overvalued: " + ", ".join(parts) + ".")
+    if is_overbought:
+        reasons.append(f"Overbought: RSI at {rsi} signals stretched buying.")
+    if is_overextended:
+        reasons.append(f"Overextended: {pct_vs_200:+.0f}% above its 200-day average.")
+    if near_52w_high and not (is_overvalued or is_overbought) and signal != "neutral":
+        reasons.append(f"Within {abs(pct_off_high):.0f}% of its 52-week high.")
+
+    if value_trap:
+        reasons.append("Screens cheap but flagged as a possible value trap ("
+                       + ", ".join(quality_flags) + ").")
+    elif quality_flags:
+        reasons.append("Quality watch: " + ", ".join(quality_flags) + ".")
+
+    if stock["trend"] and signal != "neutral":
+        reasons.append("Trend: 50-day MA is "
+                       + ("above" if stock["trend"] == "up" else "below")
+                       + " the 200-day MA.")
+
+    if not reasons:
+        reasons.append("No strong valuation, momentum, or trend signal at current levels.")
+
+    return signal, tags, " ".join(reasons)
 
 
 # ── Screen runner ─────────────────────────────────────────────────────────────
 def run_screen(
     tickers:       list[str],
-    signal_filter: str        = "both",
+    signal_filter: str        = "flagged",
     max_pe:        float | None = None,
     verbose:       bool        = True,
     batch_size:    int         = 20,
@@ -305,7 +461,11 @@ def run_screen(
     """
     results = []
     total   = len(tickers)
-    icons   = {"undervalued": "📉", "oversold": "⚠️", "both": "🔥", "neutral": "  "}
+    icons   = {
+        "buy": "🔥", "undervalued": "📉", "oversold": "⚠️",
+        "sell": "🚩", "overvalued": "📈", "overbought": "🔺",
+        "mixed": "❓", "neutral": "  ",
+    }
 
     for i, ticker in enumerate(tickers, 1):
         if verbose:
@@ -317,8 +477,9 @@ def run_screen(
                 print("skipped")
             continue
 
-        signal, thesis = classify_signal(stock, max_pe)
+        signal, tags, thesis = classify_signal(stock, max_pe)
         stock["signal"] = signal
+        stock["tags"]   = tags
         stock["thesis"] = thesis
         results.append(stock)
 
@@ -335,13 +496,19 @@ def run_screen(
             time.sleep(delay)
 
     # Apply signal filter
-    if signal_filter == "both":
-        matched = [r for r in results if r["signal"] in ("undervalued", "oversold", "both")]
-    elif signal_filter in ("undervalued", "oversold"):
-        matched = [r for r in results if r["signal"] in (signal_filter, "both")]
-    else:
-        matched = results
+    def _passes(stock: dict) -> bool:
+        tags = stock["tags"]
+        if signal_filter == "all":
+            return True
+        if signal_filter == "flagged":
+            return stock["signal"] != "neutral"
+        if signal_filter == "buy":
+            return any(t in tags for t in BUY_TAGS)
+        if signal_filter == "sell":
+            return any(t in tags for t in SELL_TAGS)
+        return signal_filter in tags        # a specific tag name
 
+    matched = [r for r in results if _passes(r)]
     return matched, len(results)
 
 
@@ -355,19 +522,36 @@ def print_report(stocks: list[dict], screened: int) -> None:
     if not stocks:
         print("  No stocks matched the selected filters.\n")
         return
-    labels = {"undervalued": "UNDERVALUED", "oversold": "OVERSOLD",
-              "both": "UNDERVALUED + OVERSOLD", "neutral": "NEUTRAL"}
+    labels = {
+        "buy":         "BUY  — UNDERVALUED + OVERSOLD",
+        "undervalued": "UNDERVALUED",
+        "oversold":    "OVERSOLD",
+        "sell":        "SELL — OVERVALUED + STRETCHED",
+        "overvalued":  "OVERVALUED",
+        "overbought":  "OVERBOUGHT",
+        "mixed":       "MIXED SIGNALS",
+        "neutral":     "NEUTRAL",
+    }
     for s in stocks:
-        chg_s  = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
-        pe_s   = f"{s['pe']}x"  if s["pe"]  is not None else "N/A"
-        pb_s   = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
-        rsi_s  = str(s["rsi"]) if s["rsi"] is not None else "N/A"
+        chg_s   = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
+        pe_s    = f"{s['pe']}x"  if s["pe"]  is not None else "N/A"
+        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
+        peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
+        rsi_s   = str(s["rsi"]) if s["rsi"] is not None else "N/A"
+        ma200_s = f"{s['pct_vs_200']:+.0f}% vs 200DMA" if s["pct_vs_200"] is not None else "N/A"
+        hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
+        lo_s    = f"{s['pct_off_low']:+.0f}%"  if s["pct_off_low"]  is not None else "N/A"
+        dte_s   = f"{s['debt_equity']:.0f}%"   if s["debt_equity"]  is not None else "N/A"
+        mgn_s   = f"{s['margin']:.1f}%"        if s["margin"]       is not None else "N/A"
         print(f"\n  {s['ticker']:6}  {s['name']}")
         print(f"  {'─' * (W - 2)}")
-        print(f"  Price : ${s['price']:<10.2f}  Today : {chg_s}")
-        print(f"  P/E   : {pe_s:<10}  P/B   : {pb_s}")
-        print(f"  RSI   : {rsi_s:<10}  Sector: {s['sector']}")
-        print(f"  Signal: {labels.get(s['signal'], '')}")
+        print(f"  Price  : ${s['price']:<10.2f}  Today : {chg_s}")
+        print(f"  P/E    : {pe_s:<10}  P/B   : {pb_s}")
+        print(f"  PEG    : {peg_s:<10}  RSI   : {rsi_s}")
+        print(f"  Trend  : {ma200_s:<15}  52wk  : {lo_s} from low / {hi_s} from high")
+        print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
+        print(f"  Sector : {s['sector']}")
+        print(f"  Signal : {labels.get(s['signal'], s['signal'].upper())}")
         print(f"  {s['thesis']}")
     print("\n" + "═" * W)
     print("  ⚠  Not financial advice. Always do your own research.\n")
@@ -378,19 +562,28 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
                      index_label: str = "") -> None:
     date_str = datetime.now().strftime("%B %d, %Y  %H:%M")
     badge = {
-        "undervalued": ("Undervalued",            "#f0fdf4", "#16a34a"),
-        "oversold":    ("Oversold",                "#fffbeb", "#d97706"),
-        "both":        ("Undervalued + Oversold",  "#eff6ff", "#2563eb"),
-        "neutral":     ("Neutral",                 "#f5f5f3", "#6b6b67"),
+        "buy":         ("Buy signal",   "#eff6ff", "#2563eb"),
+        "undervalued": ("Undervalued",  "#f0fdf4", "#16a34a"),
+        "oversold":    ("Oversold",     "#fffbeb", "#d97706"),
+        "sell":        ("Sell signal",  "#fef2f2", "#dc2626"),
+        "overvalued":  ("Overvalued",   "#fdf2f8", "#db2777"),
+        "overbought":  ("Overbought",   "#fff7ed", "#ea580c"),
+        "mixed":       ("Mixed",        "#f5f3ff", "#7c3aed"),
+        "neutral":     ("Neutral",      "#f5f5f3", "#6b6b67"),
     }
     cards = ""
     for s in stocks:
         label, bg, fg = badge.get(s["signal"], ("Neutral", "#f5f5f3", "#6b6b67"))
-        chg_c  = "#16a34a" if s["change1d"] >= 0 else "#dc2626"
-        chg_s  = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
-        pe_s   = f"{s['pe']}x"  if s["pe"]  is not None else "N/A"
-        pb_s   = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
-        rsi_s  = str(s["rsi"]) if s["rsi"] is not None else "N/A"
+        chg_c   = "#16a34a" if s["change1d"] >= 0 else "#dc2626"
+        chg_s   = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
+        pe_s    = f"{s['pe']}x"  if s["pe"]  is not None else "N/A"
+        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
+        peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
+        rsi_s   = str(s["rsi"]) if s["rsi"] is not None else "N/A"
+        ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
+        hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
+        dte_s   = f"{s['debt_equity']:.0f}%"  if s["debt_equity"] is not None else "N/A"
+        mgn_s   = f"{s['margin']:.1f}%"       if s["margin"]      is not None else "N/A"
         cards += f"""
         <div class="card">
           <div class="card-top">
@@ -403,7 +596,12 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
           <div class="metrics">
             <div><div class="ml">P/E ratio</div><div class="mv">{pe_s}</div></div>
             <div><div class="ml">P/B ratio</div><div class="mv">{pb_s}</div></div>
+            <div><div class="ml">PEG ratio</div><div class="mv">{peg_s}</div></div>
             <div><div class="ml">RSI (14d)</div><div class="mv">{rsi_s}</div></div>
+            <div><div class="ml">vs 200-day</div><div class="mv">{ma200_s}</div></div>
+            <div><div class="ml">Off 52w high</div><div class="mv">{hi_s}</div></div>
+            <div><div class="ml">Debt / equity</div><div class="mv">{dte_s}</div></div>
+            <div><div class="ml">Profit margin</div><div class="mv">{mgn_s}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -438,7 +636,7 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
 .ssub{{font-size:12px;color:#6b6b67;margin-top:2px}}
 .badge{{font-size:11px;padding:3px 9px;border-radius:6px;font-weight:500;
          white-space:nowrap;flex-shrink:0}}
-.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;
+.metrics{{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
            padding:10px 0;border-top:0.5px solid rgba(0,0,0,.1);
            border-bottom:0.5px solid rgba(0,0,0,.1);margin-bottom:10px}}
 .ml{{font-size:10px;color:#9f9f9b;margin-bottom:3px}}
@@ -472,31 +670,39 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
 # ── CLI ───────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
-        description="Stock screener — undervalued & oversold signals from Yahoo Finance.",
+        description="Stock screener — buy-side (undervalued / oversold) and "
+                    "sell-side (overvalued / overbought / overextended) signals "
+                    "from Yahoo Finance.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python stock_screener.py                            # default 15-stock watchlist
   python stock_screener.py --index sp500              # all ~500 S&P stocks
-  python stock_screener.py --index dow30              # Dow 30
-  python stock_screener.py --index nasdaq100          # NASDAQ 100
-  python stock_screener.py --index russell2000        # Russell 2000 sample
+  python stock_screener.py --index sp500 --signal sell    # trim candidates
+  python stock_screener.py --index nasdaq100 --signal overbought
   python stock_screener.py --index sp500 --signal oversold --max-pe 20
   python stock_screener.py --tickers AAPL MSFT TSLA --output report.html
   python stock_screener.py --list-indices
+
+Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
         """
     )
     parser.add_argument("--index",   choices=list(INDICES.keys()), default=None,
                         help="Screen an entire index")
     parser.add_argument("--tickers", nargs="+", default=None, metavar="TICK",
                         help="Custom space-separated tickers (overrides --index and default list)")
-    parser.add_argument("--signal",  choices=["both","undervalued","oversold","all"],
-                        default="both",
-                        help="Signal filter (default: both)")
+    parser.add_argument("--signal",
+                        choices=["flagged", "buy", "sell", "all",
+                                 "undervalued", "oversold", "overvalued", "overbought"],
+                        default="flagged",
+                        help="Which signals to include (default: flagged = any non-neutral; "
+                             "buy = undervalued/oversold; sell = overvalued/overbought/overextended)")
     parser.add_argument("--max-pe",  type=float, default=None, metavar="N",
                         help="Only include stocks with P/E below N")
     parser.add_argument("--output",  type=str, default=None, metavar="FILE.html",
                         help="Save HTML report to this file")
+    parser.add_argument("--log-dir", type=str, default="logs", metavar="DIR",
+                        help="Directory for timestamped run logs (default: ./logs)")
     parser.add_argument("--list-indices", action="store_true",
                         help="Show available indices and exit")
     args = parser.parse_args()
@@ -509,37 +715,49 @@ Examples:
         print()
         return
 
-    # Resolve ticker list
-    index_label = ""
-    if args.tickers:
-        tickers = [t.upper().strip() for t in args.tickers]
-    elif args.index:
-        index_label = INDICES[args.index]["label"]
-        print(f"\nLoading index: {index_label}")
-        tickers = load_index(args.index)
-    else:
-        tickers = DEFAULT_TICKERS
+    # ── Start run log: mirror everything to ./logs/screener_<timestamp>.log ──
+    log_file, log_path = _open_run_log(args.log_dir)
+    sys.stdout = _Tee(sys.__stdout__, log_file)
+    sys.stderr = _Tee(sys.__stderr__, log_file)
 
-    print(f"\nStock screener  ·  {datetime.now().strftime('%B %d, %Y')}")
-    print(f"Index   : {index_label or 'custom/default watchlist'}")
-    print(f"Tickers : {len(tickers)} to analyze")
-    print(f"Signal  : {args.signal}")
-    print(f"Max P/E : {args.max_pe or 'none'}")
-    print(f"Output  : {args.output or 'terminal only'}")
-    print(f"\nFetching live data from Yahoo Finance…\n")
+    try:
+        # Resolve ticker list
+        index_label = ""
+        if args.tickers:
+            tickers = [t.upper().strip() for t in args.tickers]
+        elif args.index:
+            index_label = INDICES[args.index]["label"]
+            print(f"\nLoading index: {index_label}")
+            tickers = load_index(args.index)
+        else:
+            tickers = DEFAULT_TICKERS
 
-    stocks, screened = run_screen(
-        tickers       = tickers,
-        signal_filter = args.signal,
-        max_pe        = args.max_pe,
-        verbose       = True,
-    )
+        print(f"\nStock screener  ·  {datetime.now().strftime('%B %d, %Y')}")
+        print(f"Index   : {index_label or 'custom/default watchlist'}")
+        print(f"Tickers : {len(tickers)} to analyze")
+        print(f"Signal  : {args.signal}")
+        print(f"Max P/E : {args.max_pe or 'none'}")
+        print(f"Output  : {args.output or 'terminal only'}")
+        print(f"Run log : {os.path.abspath(log_path)}")
+        print(f"\nFetching live data from Yahoo Finance…\n")
 
-    print_report(stocks, screened)
+        stocks, screened = run_screen(
+            tickers       = tickers,
+            signal_filter = args.signal,
+            max_pe        = args.max_pe,
+            verbose       = True,
+        )
 
-    if args.output:
-        save_html_report(stocks, screened, args.output, index_label)
-        print(f"  HTML report saved → {os.path.abspath(args.output)}\n")
+        print_report(stocks, screened)
+
+        if args.output:
+            save_html_report(stocks, screened, args.output, index_label)
+            print(f"  HTML report saved → {os.path.abspath(args.output)}\n")
+    finally:
+        print(f"  Run log saved  → {os.path.abspath(log_path)}\n")
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        log_file.close()
 
 
 if __name__ == "__main__":
