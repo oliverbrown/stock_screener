@@ -21,6 +21,7 @@ Usage:
     python stock_screener.py --index nasdaq100        # NASDAQ 100
     python stock_screener.py --tickers AAPL MSFT TSLA
     python stock_screener.py --index sp500 --signal oversold --max-pe 20 --output report.html
+    python stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
     python stock_screener.py --list-indices           # show all available indices
 
 Requirements:
@@ -71,6 +72,25 @@ def _open_run_log(log_dir: str = "logs"):
         path = os.path.join(log_dir, f"screener_{stamp}_{n}.log")
         n += 1
     return open(path, "w", encoding="utf-8", buffering=1), path
+
+
+def resolve_output_path(output: str | None, index_key: str | None) -> str | None:
+    """Fold the index name into the --output filename.
+
+    - "{index}" anywhere in the name is replaced with the index slug
+      (or "watchlist" when screening the default / custom list).
+    - Otherwise, when an index is selected, the slug is inserted before
+      the extension:  daily.html  --index sp500  ->  daily-sp500.html
+    """
+    if not output:
+        return None
+    slug = index_key or "watchlist"
+    if "{index}" in output:
+        return output.replace("{index}", slug)
+    if index_key:
+        root, ext = os.path.splitext(output)
+        return f"{root}-{index_key}{ext or '.html'}"
+    return output
 
 
 # ── Sector P/E benchmarks ─────────────────────────────────────────────────────
@@ -681,6 +701,7 @@ Examples:
   python stock_screener.py --index sp500 --signal sell    # trim candidates
   python stock_screener.py --index nasdaq100 --signal overbought
   python stock_screener.py --index sp500 --signal oversold --max-pe 20
+  python stock_screener.py --index sp500 --output daily.html   # -> daily-sp500.html
   python stock_screener.py --tickers AAPL MSFT TSLA --output report.html
   python stock_screener.py --list-indices
 
@@ -700,7 +721,9 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
     parser.add_argument("--max-pe",  type=float, default=None, metavar="N",
                         help="Only include stocks with P/E below N")
     parser.add_argument("--output",  type=str, default=None, metavar="FILE.html",
-                        help="Save HTML report to this file")
+                        help="Save HTML report to this file. With --index, the index "
+                             "name is added automatically (daily.html -> daily-sp500.html); "
+                             "use a literal {index} in the name to place it yourself")
     parser.add_argument("--log-dir", type=str, default="logs", metavar="DIR",
                         help="Directory for timestamped run logs (default: ./logs)")
     parser.add_argument("--list-indices", action="store_true",
@@ -732,12 +755,14 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
         else:
             tickers = DEFAULT_TICKERS
 
+        out_path = resolve_output_path(args.output, args.index)
+
         print(f"\nStock screener  ·  {datetime.now().strftime('%B %d, %Y')}")
         print(f"Index   : {index_label or 'custom/default watchlist'}")
         print(f"Tickers : {len(tickers)} to analyze")
         print(f"Signal  : {args.signal}")
         print(f"Max P/E : {args.max_pe or 'none'}")
-        print(f"Output  : {args.output or 'terminal only'}")
+        print(f"Output  : {out_path or 'terminal only'}")
         print(f"Run log : {os.path.abspath(log_path)}")
         print(f"\nFetching live data from Yahoo Finance…\n")
 
@@ -750,9 +775,9 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
 
         print_report(stocks, screened)
 
-        if args.output:
-            save_html_report(stocks, screened, args.output, index_label)
-            print(f"  HTML report saved → {os.path.abspath(args.output)}\n")
+        if out_path:
+            save_html_report(stocks, screened, out_path, index_label)
+            print(f"  HTML report saved → {os.path.abspath(out_path)}\n")
     finally:
         print(f"  Run log saved  → {os.path.abspath(log_path)}\n")
         sys.stdout = sys.__stdout__
