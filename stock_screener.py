@@ -20,6 +20,7 @@ Usage:
     python3 stock_screener.py --index dow30 --signal sell
     python3 stock_screener.py --index nasdaq100        # NASDAQ 100
     python3 stock_screener.py --tickers AAPL MSFT TSLA
+    python3 stock_screener.py --tickers-file watchlist.txt   # whitespace/comma/newline separated
     python3 stock_screener.py --index sp500 --signal oversold --max-pe 20 --output report.html
     python3 stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
     python3 stock_screener.py --list-indices           # show all available indices
@@ -32,6 +33,7 @@ import argparse
 import sys
 import os
 import io
+import re
 import time
 import random
 import urllib.request
@@ -59,6 +61,31 @@ class _Tee:
     def flush(self):
         for s in self._streams:
             s.flush()
+
+
+def parse_tickers(text: str) -> list[str]:
+    """Split a blob of ticker symbols on any run of whitespace, newlines,
+    carriage returns, and/or commas. Upper-cased, de-duplicated, order kept."""
+    seen, out = set(), []
+    for tok in re.split(r"[,\s]+", text.strip()):
+        sym = tok.strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    return out
+
+
+def load_tickers_file(path: str) -> list[str]:
+    """Read tickers from a file (see parse_tickers for the accepted format)."""
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+    except OSError as e:
+        sys.exit(f"Could not read tickers file: {e}")
+    tickers = parse_tickers(text)
+    if not tickers:
+        sys.exit(f"No tickers found in {path}")
+    return tickers
 
 
 def _open_run_log(log_dir: str = "logs"):
@@ -703,6 +730,7 @@ Examples:
   python3 stock_screener.py --index sp500 --signal oversold --max-pe 20
   python3 stock_screener.py --index sp500 --output daily.html   # -> daily-sp500.html
   python3 stock_screener.py --tickers AAPL MSFT TSLA --output report.html
+  python3 stock_screener.py --tickers-file watchlist.txt
   python3 stock_screener.py --list-indices
 
 Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
@@ -712,6 +740,10 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
                         help="Screen an entire index")
     parser.add_argument("--tickers", nargs="+", default=None, metavar="TICK",
                         help="Custom space-separated tickers (overrides --index and default list)")
+    parser.add_argument("--tickers-file", type=str, default=None, metavar="FILE",
+                        help="Read tickers from a file, separated by any whitespace, "
+                             "newlines, carriage returns, and/or commas "
+                             "(overrides --index; --tickers wins over this)")
     parser.add_argument("--signal",
                         choices=["flagged", "buy", "sell", "all",
                                  "undervalued", "oversold", "overvalued", "overbought"],
@@ -747,7 +779,10 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
         # Resolve ticker list
         index_label = ""
         if args.tickers:
-            tickers = [t.upper().strip() for t in args.tickers]
+            tickers = parse_tickers(" ".join(args.tickers))
+        elif args.tickers_file:
+            tickers = load_tickers_file(args.tickers_file)
+            print(f"\nLoaded {len(tickers)} tickers from {args.tickers_file}")
         elif args.index:
             index_label = INDICES[args.index]["label"]
             print(f"\nLoading index: {index_label}")
