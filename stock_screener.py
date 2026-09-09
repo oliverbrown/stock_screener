@@ -4,7 +4,7 @@ Stock Screener — no API key required
 Pulls live data from Yahoo Finance via yfinance.
 Supports major indices: S&P 500, Dow 30, NASDAQ 100, Russell 2000.
 
-Signals:
+Stocks (equities):
     Buy side  — undervalued (P/E / P/B vs sector), oversold (RSI < 35)
     Sell side — overvalued (P/E vs sector, PEG > 2), overbought (RSI > 70),
                 overextended (>20% above the 200-day moving average)
@@ -12,16 +12,25 @@ Signals:
                 value-trap guard (high debt / negative margins) that
                 suppresses a stale "undervalued" call
 
+ETFs / funds (auto-detected by quoteType):
+    Buy side  — undervalued (discount to NAV, or holdings P/E below the
+                fund's category benchmark), oversold (RSI / trend)
+    Sell side — overvalued (premium to NAV, or holdings P/E above category),
+                overbought, overextended
+    hold      — no signal either way
+    Context   — NAV premium/discount (always shown), distribution yield,
+                expense ratio (a high-cost fund is not a "bargain"), 3y beta
+
 Every run is also written to a timestamped log file in ./logs/.
 
 Usage:
     python3 stock_screener.py                          # default watchlist
     python3 stock_screener.py --index sp500            # all S&P 500 stocks
     python3 stock_screener.py --index dow30 --signal sell
-    python3 stock_screener.py --index nasdaq100        # NASDAQ 100
     python3 stock_screener.py --tickers AAPL MSFT TSLA
     python3 stock_screener.py --tickers-file watchlist.txt   # whitespace/comma/newline separated
-    python3 stock_screener.py --index sp500 --signal oversold --max-pe 20 --output report.html
+    python3 stock_screener.py --tickers-file mixed.txt --asset-type etf   # ETFs only
+    python3 stock_screener.py --tickers VOO QQQ SMH --signal hold
     python3 stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
     python3 stock_screener.py --list-indices           # show all available indices
 
@@ -135,6 +144,37 @@ SECTOR_PE = {
     "Communication Services": 20,
 }
 DEFAULT_SECTOR_PE = 20
+
+# ── ETF category P/E benchmarks (yfinance "category" strings) ──────────────────
+# Used to judge whether an equity fund's blended holdings P/E looks rich or
+# cheap. Bond / commodity / preferred funds have no P/E and skip this entirely.
+CATEGORY_PE = {
+    "Large Blend":               21,
+    "Large Growth":              28,
+    "Large Value":               16,
+    "Mid-Cap Blend":             18,
+    "Mid-Cap Growth":            25,
+    "Mid-Cap Value":             15,
+    "Small Blend":               16,
+    "Small Growth":              22,
+    "Small Value":               14,
+    "Technology":                28,
+    "Health":                    20,
+    "Financial":                 14,
+    "Equity Energy":             12,
+    "Industrials":               20,
+    "Utilities":                 18,
+    "Real Estate":               30,
+    "Consumer Cyclical":         22,
+    "Consumer Defensive":        22,
+    "Communications":            20,
+    "Foreign Large Blend":       15,
+    "Foreign Large Growth":      19,
+    "Foreign Large Value":       12,
+    "Diversified Emerging Mkts": 14,
+    "Focused Region":            13,
+}
+DEFAULT_CATEGORY_PE = 20
 
 # ── Default watchlist ─────────────────────────────────────────────────────────
 DEFAULT_TICKERS = [
@@ -340,16 +380,34 @@ def fetch_stock(ticker: str) -> dict | None:
         pct_off_high = round((price / wk_high - 1) * 100, 1) if wk_high else None
         pct_off_low  = round((price / wk_low  - 1) * 100, 1) if wk_low  else None
 
-        pe     = info.get("trailingPE") or info.get("forwardPE")
+        quote_type = (info.get("quoteType") or "EQUITY").upper()
+        is_fund    = quote_type != "EQUITY"
+
+        if is_fund:
+            # Only the fund's blended holdings P/E; ignore garbage forward values
+            raw_pe = info.get("trailingPE")
+            pe = raw_pe if (raw_pe and 0 < raw_pe < 200) else None
+        else:
+            pe = info.get("trailingPE") or info.get("forwardPE")
         pb     = info.get("priceToBook")
         peg    = info.get("trailingPegRatio") or info.get("pegRatio")
         dte    = info.get("debtToEquity")          # already expressed as a percentage
         margin = info.get("profitMargins")         # fraction, e.g. -0.05
 
+        # ── Fund-only fields ────────────────────────────────────────────────
+        nav      = info.get("navPrice")
+        nav_prem = round((price / nav - 1) * 100, 2) if nav else None
+        expense  = info.get("netExpenseRatio")     # percent, e.g. 0.03 = 0.03%
+        fyield   = info.get("yield")               # fraction, e.g. 0.0104
+        beta     = info.get("beta3Year") or info.get("beta")
+
         return {
             "ticker":       ticker,
             "name":         info.get("longName") or info.get("shortName", ticker),
             "sector":       info.get("sector", "Unknown"),
+            "quote_type":   quote_type,
+            "is_fund":      is_fund,
+            "category":     info.get("category"),
             "price":        round(price, 2),
             "change1d":     change1d,
             "pe":           round(float(pe), 1)  if pe  else None,
@@ -366,6 +424,10 @@ def fetch_stock(ticker: str) -> dict | None:
             "pct_off_low":  pct_off_low,
             "debt_equity":  round(float(dte), 0)        if dte    is not None else None,
             "margin":       round(float(margin) * 100, 1) if margin is not None else None,
+            "nav_premium":  nav_prem,
+            "expense":      round(float(expense), 2) if expense is not None else None,
+            "fund_yield":   round(float(fyield) * 100, 2) if fyield is not None else None,
+            "beta":         round(float(beta), 2) if beta is not None else None,
         }
     except Exception:
         return None
@@ -493,11 +555,114 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
     return signal, tags, " ".join(reasons)
 
 
+def classify_fund(fund: dict, max_pe: float | None) -> tuple[str, list[str], str]:
+    """ETF / fund classifier. Same buy/sell/hold vocabulary as classify_signal,
+    but valuation comes from price-vs-NAV and holdings-P/E-vs-category rather
+    than single-company fundamentals."""
+    pe           = fund["pe"]
+    rsi          = fund["rsi"]
+    category     = fund["category"] or "Fund"
+    nav_prem     = fund["nav_premium"]
+    expense      = fund["expense"]
+    pct_vs_200   = fund["pct_vs_200"]
+    pct_off_high = fund["pct_off_high"]
+    pct_off_low  = fund["pct_off_low"]
+
+    rsi_ok = isinstance(rsi, float) and not pd.isna(rsi)
+    cat_pe = CATEGORY_PE.get(category, DEFAULT_CATEGORY_PE)
+
+    # ── Momentum ───────────────────────────────────────────────────────────
+    is_oversold   = rsi_ok and rsi < 35
+    is_overbought = rsi_ok and rsi > 70
+
+    # ── Trend / extension ──────────────────────────────────────────────────
+    is_overextended = pct_vs_200 is not None and pct_vs_200 > 20
+    near_52w_high   = pct_off_high is not None and pct_off_high > -3
+    near_52w_low    = pct_off_low  is not None and pct_off_low  < 5
+
+    # ── Valuation: price vs NAV, and holdings P/E vs category benchmark ─────
+    cheap_to_nav = nav_prem is not None and nav_prem < -1.5
+    rich_to_nav  = nav_prem is not None and nav_prem >  1.5
+    pe_cheap = pe is not None and pe < cat_pe * 0.80
+    pe_rich  = pe is not None and pe > cat_pe * 1.25
+    if max_pe is not None and pe is not None and pe > max_pe:
+        pe_cheap = False
+
+    is_undervalued = cheap_to_nav or pe_cheap
+    is_overvalued  = rich_to_nav or pe_rich
+
+    # Cost guard — a high-fee fund is not a "bargain".
+    costly = expense is not None and expense > 0.50
+    expensive_trap = is_undervalued and expense is not None and expense > 0.75
+    if expensive_trap:
+        is_undervalued = False
+
+    # ── Tags + headline signal ─────────────────────────────────────────────
+    tags = []
+    if is_undervalued:   tags.append("undervalued")
+    if is_oversold:      tags.append("oversold")
+    if is_overvalued:    tags.append("overvalued")
+    if is_overbought:    tags.append("overbought")
+    if is_overextended:  tags.append("overextended")
+
+    buy  = is_undervalued or is_oversold
+    sell = is_overvalued or is_overbought or is_overextended
+
+    if buy and sell:
+        signal = "mixed"
+    elif buy:
+        signal = "buy"  if (is_undervalued and is_oversold) else \
+                 "undervalued" if is_undervalued else "oversold"
+    elif sell:
+        signal = "sell" if (is_overvalued and (is_overbought or is_overextended)) else \
+                 "overvalued" if is_overvalued else "overbought"
+    else:
+        signal = "hold"
+
+    # ── Thesis text ────────────────────────────────────────────────────────
+    reasons = []
+    if cheap_to_nav:
+        reasons.append(f"Trading {nav_prem:+.1f}% vs NAV (discount).")
+    if pe_cheap:
+        reasons.append(f"Holdings P/E {pe:.0f}x vs {category} avg ~{cat_pe}x.")
+    if is_oversold:
+        reasons.append(f"Oversold: RSI at {rsi} signals excess selling pressure.")
+    if near_52w_low and signal != "hold" and not is_undervalued:
+        reasons.append(f"Trading {pct_off_low:+.0f}% from its 52-week low.")
+
+    if rich_to_nav:
+        reasons.append(f"Trading {nav_prem:+.1f}% vs NAV (premium).")
+    if pe_rich:
+        reasons.append(f"Holdings P/E {pe:.0f}x vs {category} avg ~{cat_pe}x.")
+    if is_overbought:
+        reasons.append(f"Overbought: RSI at {rsi} signals stretched buying.")
+    if is_overextended:
+        reasons.append(f"Overextended: {pct_vs_200:+.0f}% above its 200-day average.")
+    if near_52w_high and signal != "hold" and not (is_overvalued or is_overbought):
+        reasons.append(f"Within {abs(pct_off_high):.0f}% of its 52-week high.")
+
+    if expensive_trap:
+        reasons.append(f"Screens cheap but expense ratio {expense:.2f}% is high.")
+    elif costly:
+        reasons.append(f"Cost watch: expense ratio {expense:.2f}%.")
+
+    if fund["trend"] and signal != "hold":
+        reasons.append("Trend: 50-day MA is "
+                       + ("above" if fund["trend"] == "up" else "below")
+                       + " the 200-day MA.")
+
+    if not reasons:
+        reasons.append("No strong valuation, momentum, or trend signal — hold.")
+
+    return signal, tags, " ".join(reasons)
+
+
 # ── Screen runner ─────────────────────────────────────────────────────────────
 def run_screen(
     tickers:       list[str],
     signal_filter: str        = "flagged",
     max_pe:        float | None = None,
+    asset_type:    str         = "all",
     verbose:       bool        = True,
     batch_size:    int         = 20,
     delay:         float       = 1.0,
@@ -511,7 +676,7 @@ def run_screen(
     icons   = {
         "buy": "🔥", "undervalued": "📉", "oversold": "⚠️",
         "sell": "🚩", "overvalued": "📈", "overbought": "🔺",
-        "mixed": "❓", "neutral": "  ",
+        "mixed": "❓", "neutral": "  ", "hold": "  ",
     }
 
     for i, ticker in enumerate(tickers, 1):
@@ -524,7 +689,14 @@ def run_screen(
                 print("skipped")
             continue
 
-        signal, tags, thesis = classify_signal(stock, max_pe)
+        if (asset_type == "stock" and stock["is_fund"]) or \
+           (asset_type == "etf"   and stock["quote_type"] != "ETF"):
+            if verbose:
+                print(f"filtered ({stock['quote_type'].lower()})")
+            continue
+
+        classifier = classify_fund if stock["is_fund"] else classify_signal
+        signal, tags, thesis = classifier(stock, max_pe)
         stock["signal"] = signal
         stock["tags"]   = tags
         stock["thesis"] = thesis
@@ -532,9 +704,10 @@ def run_screen(
 
         if verbose:
             icon = icons.get(signal, "  ")
+            kind = f"[{stock['quote_type'][:3]}] " if stock["is_fund"] else ""
             pe_s = f"P/E {stock['pe']}x" if stock["pe"] else "P/E N/A"
             rsi_s = f"RSI {stock['rsi']}" if stock["rsi"] else ""
-            print(f"{icon} {signal:<12}  {pe_s}  {rsi_s}")
+            print(f"{icon} {kind}{signal:<12}  {pe_s}  {rsi_s}")
 
         # Polite delay every batch_size tickers to avoid rate limits
         if i % batch_size == 0 and i < total:
@@ -548,7 +721,9 @@ def run_screen(
         if signal_filter == "all":
             return True
         if signal_filter == "flagged":
-            return stock["signal"] != "neutral"
+            return stock["signal"] not in ("neutral", "hold")
+        if signal_filter == "hold":
+            return stock["signal"] in ("neutral", "hold")
         if signal_filter == "buy":
             return any(t in tags for t in BUY_TAGS)
         if signal_filter == "sell":
@@ -578,16 +753,36 @@ def print_report(stocks: list[dict], screened: int) -> None:
         "overbought":  "OVERBOUGHT",
         "mixed":       "MIXED SIGNALS",
         "neutral":     "NEUTRAL",
+        "hold":        "HOLD",
     }
     for s in stocks:
         chg_s   = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
         pe_s    = f"{s['pe']}x"  if s["pe"]  is not None else "N/A"
-        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
-        peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         rsi_s   = str(s["rsi"]) if s["rsi"] is not None else "N/A"
         ma200_s = f"{s['pct_vs_200']:+.0f}% vs 200DMA" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
         lo_s    = f"{s['pct_off_low']:+.0f}%"  if s["pct_off_low"]  is not None else "N/A"
+        sig_s   = labels.get(s["signal"], s["signal"].upper())
+
+        if s["is_fund"]:
+            nav_s  = f"{s['nav_premium']:+.2f}% vs NAV" if s["nav_premium"] is not None else "N/A"
+            yld_s  = f"{s['fund_yield']:.2f}%" if s["fund_yield"] is not None else "N/A"
+            exp_s  = f"{s['expense']:.2f}%"    if s["expense"]    is not None else "N/A"
+            beta_s = str(s["beta"]) if s["beta"] is not None else "N/A"
+            print(f"\n  {s['ticker']:6}  {s['name']}  [{s['quote_type']}]")
+            print(f"  {'─' * (W - 2)}")
+            print(f"  Price   : ${s['price']:<10.2f} Today : {chg_s}")
+            print(f"  NAV     : {nav_s:<16} Yield : {yld_s}")
+            print(f"  Hold P/E: {pe_s:<16} RSI   : {rsi_s}")
+            print(f"  Trend   : {ma200_s:<16} 52wk  : {lo_s} from low / {hi_s} from high")
+            print(f"  Expense : {exp_s:<16} Beta  : {beta_s}")
+            print(f"  Category: {s['category'] or '—'}")
+            print(f"  Signal  : {sig_s}")
+            print(f"  {s['thesis']}")
+            continue
+
+        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
+        peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"   if s["debt_equity"]  is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"        if s["margin"]       is not None else "N/A"
         print(f"\n  {s['ticker']:6}  {s['name']}")
@@ -598,7 +793,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  Trend  : {ma200_s:<15}  52wk  : {lo_s} from low / {hi_s} from high")
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
         print(f"  Sector : {s['sector']}")
-        print(f"  Signal : {labels.get(s['signal'], s['signal'].upper())}")
+        print(f"  Signal : {sig_s}")
         print(f"  {s['thesis']}")
     print("\n" + "═" * W)
     print("  ⚠  Not financial advice. Always do your own research.\n")
@@ -617,6 +812,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         "overbought":  ("Overbought",   "#fff7ed", "#ea580c"),
         "mixed":       ("Mixed",        "#f5f3ff", "#7c3aed"),
         "neutral":     ("Neutral",      "#f5f5f3", "#6b6b67"),
+        "hold":        ("Hold",         "#f5f5f3", "#6b6b67"),
     }
     cards = ""
     for s in stocks:
@@ -624,11 +820,42 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         chg_c   = "#16a34a" if s["change1d"] >= 0 else "#dc2626"
         chg_s   = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
         pe_s    = f"{s['pe']}x"  if s["pe"]  is not None else "N/A"
-        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
-        peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         rsi_s   = str(s["rsi"]) if s["rsi"] is not None else "N/A"
         ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
+
+        if s["is_fund"]:
+            nav_s  = f"{s['nav_premium']:+.2f}%" if s["nav_premium"] is not None else "N/A"
+            yld_s  = f"{s['fund_yield']:.2f}%" if s["fund_yield"] is not None else "N/A"
+            exp_s  = f"{s['expense']:.2f}%"    if s["expense"]    is not None else "N/A"
+            beta_s = str(s["beta"]) if s["beta"] is not None else "N/A"
+            cards += f"""
+        <div class="card">
+          <div class="card-top">
+            <div>
+              <div class="sname">{s['ticker']} <span class="price">${s['price']:.2f}</span>
+                <span class="kind">{s['quote_type']}</span></div>
+              <div class="ssub">{s['name']} &middot; {s['category'] or 'fund'}</div>
+            </div>
+            <span class="badge" style="background:{bg};color:{fg}">{label}</span>
+          </div>
+          <div class="metrics">
+            <div><div class="ml">Price vs NAV</div><div class="mv">{nav_s}</div></div>
+            <div><div class="ml">Yield</div><div class="mv">{yld_s}</div></div>
+            <div><div class="ml">Holdings P/E</div><div class="mv">{pe_s}</div></div>
+            <div><div class="ml">RSI (14d)</div><div class="mv">{rsi_s}</div></div>
+            <div><div class="ml">vs 200-day</div><div class="mv">{ma200_s}</div></div>
+            <div><div class="ml">Off 52w high</div><div class="mv">{hi_s}</div></div>
+            <div><div class="ml">Expense ratio</div><div class="mv">{exp_s}</div></div>
+            <div><div class="ml">Beta (3y)</div><div class="mv">{beta_s}</div></div>
+            <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
+          </div>
+          <div class="thesis">{s['thesis']}</div>
+        </div>"""
+            continue
+
+        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
+        peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"  if s["debt_equity"] is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"       if s["margin"]      is not None else "N/A"
         cards += f"""
@@ -680,6 +907,8 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
             gap:8px;margin-bottom:10px}}
 .sname{{font-size:15px;font-weight:500}}
 .price{{font-weight:400}}
+.kind{{font-size:10px;font-weight:600;color:#6b6b67;border:0.5px solid rgba(0,0,0,.18);
+        border-radius:4px;padding:1px 4px;margin-left:4px;vertical-align:middle}}
 .ssub{{font-size:12px;color:#6b6b67;margin-top:2px}}
 .badge{{font-size:11px;padding:3px 9px;border-radius:6px;font-weight:500;
          white-space:nowrap;flex-shrink:0}}
@@ -731,9 +960,13 @@ Examples:
   python3 stock_screener.py --index sp500 --output daily.html   # -> daily-sp500.html
   python3 stock_screener.py --tickers AAPL MSFT TSLA --output report.html
   python3 stock_screener.py --tickers-file watchlist.txt
+  python3 stock_screener.py --tickers-file mixed.txt --asset-type etf   # ETFs only
+  python3 stock_screener.py --tickers VOO QQQ SMH --signal hold
   python3 stock_screener.py --list-indices
 
-Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
+ETFs / funds are auto-detected and screened on price-vs-NAV, holdings P/E vs
+category, and the usual RSI / trend signals. Every run is mirrored to a
+timestamped log in ./logs/ (override with --log-dir).
         """
     )
     parser.add_argument("--index",   choices=list(INDICES.keys()), default=None,
@@ -745,13 +978,17 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
                              "newlines, carriage returns, and/or commas "
                              "(overrides --index; --tickers wins over this)")
     parser.add_argument("--signal",
-                        choices=["flagged", "buy", "sell", "all",
+                        choices=["flagged", "buy", "sell", "hold", "all",
                                  "undervalued", "oversold", "overvalued", "overbought"],
                         default="flagged",
                         help="Which signals to include (default: flagged = any non-neutral; "
-                             "buy = undervalued/oversold; sell = overvalued/overbought/overextended)")
+                             "buy = undervalued/oversold; sell = overvalued/overbought/overextended; "
+                             "hold = no signal either way)")
+    parser.add_argument("--asset-type", choices=["all", "stock", "etf"], default="all",
+                        help="Restrict to equities only or ETFs only (default: all). "
+                             "Type is auto-detected per ticker.")
     parser.add_argument("--max-pe",  type=float, default=None, metavar="N",
-                        help="Only include stocks with P/E below N")
+                        help="Only include names with P/E below N (holdings P/E for funds)")
     parser.add_argument("--output",  type=str, default=None, metavar="FILE.html",
                         help="Save HTML report to this file. With --index, the index "
                              "name is added automatically (daily.html -> daily-sp500.html); "
@@ -796,6 +1033,7 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
         print(f"Index   : {index_label or 'custom/default watchlist'}")
         print(f"Tickers : {len(tickers)} to analyze")
         print(f"Signal  : {args.signal}")
+        print(f"Assets  : {args.asset_type}")
         print(f"Max P/E : {args.max_pe or 'none'}")
         print(f"Output  : {out_path or 'terminal only'}")
         print(f"Run log : {os.path.abspath(log_path)}")
@@ -805,6 +1043,7 @@ Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
             tickers       = tickers,
             signal_filter = args.signal,
             max_pe        = args.max_pe,
+            asset_type    = args.asset_type,
             verbose       = True,
         )
 
