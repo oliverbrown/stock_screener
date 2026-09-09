@@ -15,14 +15,14 @@ Signals:
 Every run is also written to a timestamped log file in ./logs/.
 
 Usage:
-    python stock_screener.py                          # default watchlist
-    python stock_screener.py --index sp500            # all S&P 500 stocks
-    python stock_screener.py --index dow30 --signal sell
-    python stock_screener.py --index nasdaq100        # NASDAQ 100
-    python stock_screener.py --tickers AAPL MSFT TSLA
-    python stock_screener.py --index sp500 --signal oversold --max-pe 20 --output report.html
-    python stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
-    python stock_screener.py --list-indices           # show all available indices
+    python3 stock_screener.py                          # default watchlist
+    python3 stock_screener.py --index sp500            # all S&P 500 stocks
+    python3 stock_screener.py --index dow30 --signal sell
+    python3 stock_screener.py --index nasdaq100        # NASDAQ 100
+    python3 stock_screener.py --tickers AAPL MSFT TSLA
+    python3 stock_screener.py --index sp500 --signal oversold --max-pe 20 --output report.html
+    python3 stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
+    python3 stock_screener.py --list-indices           # show all available indices
 
 Requirements:
     pip install yfinance pandas
@@ -696,14 +696,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python stock_screener.py                            # default 15-stock watchlist
-  python stock_screener.py --index sp500              # all ~500 S&P stocks
-  python stock_screener.py --index sp500 --signal sell    # trim candidates
-  python stock_screener.py --index nasdaq100 --signal overbought
-  python stock_screener.py --index sp500 --signal oversold --max-pe 20
-  python stock_screener.py --index sp500 --output daily.html   # -> daily-sp500.html
-  python stock_screener.py --tickers AAPL MSFT TSLA --output report.html
-  python stock_screener.py --list-indices
+  python3 stock_screener.py                            # default 15-stock watchlist
+  python3 stock_screener.py --index sp500              # all ~500 S&P stocks
+  python3 stock_screener.py --index sp500 --signal sell    # trim candidates
+  python3 stock_screener.py --index nasdaq100 --signal overbought
+  python3 stock_screener.py --index sp500 --signal oversold --max-pe 20
+  python3 stock_screener.py --index sp500 --output daily.html   # -> daily-sp500.html
+  python3 stock_screener.py --tickers AAPL MSFT TSLA --output report.html
+  python3 stock_screener.py --list-indices
 
 Every run is mirrored to a timestamped log in ./logs/ (override with --log-dir).
         """
