@@ -8,3 +8,10 @@ venv/
 .venv/
 files.zip
 logs/
+
+# personal ticker lists / watchlists
+my-tickers.txt
+my-*.txt
+*-tickers.txt
+tickers*.txt
+watchlist*.txt
