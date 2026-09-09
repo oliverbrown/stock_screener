@@ -31,6 +31,7 @@ Usage:
     python3 stock_screener.py --tickers-file watchlist.txt   # whitespace/comma/newline separated
     python3 stock_screener.py --tickers-file mixed.txt --asset-type etf   # ETFs only
     python3 stock_screener.py --tickers VOO QQQ SMH --signal hold
+    python3 stock_screener.py --index sp500 --signal sell --ascii   # plain-ASCII output
     python3 stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
     python3 stock_screener.py --list-indices           # show all available indices
 
@@ -56,14 +57,39 @@ except ImportError:
     sys.exit(1)
 
 
+# ── Output mode ───────────────────────────────────────────────────────────────
+# Emoji status icons render on macOS out of the box but need a color-emoji font
+# on Linux. --ascii (or a non-UTF-8 / dumb terminal) swaps them for plain tags
+# and folds box-drawing / dashes / check marks down to 7-bit ASCII.
+ASCII_OUTPUT = False
+
+_ASCII_SUBS = {
+    "─": "-", "━": "-", "═": "=", "│": "|",
+    "·": "-", "•": "*", "…": "...",
+    "—": "-", "–": "-",
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "→": "->", "←": "<-", "≈": "~", "±": "+/-",
+    "✓": "OK", "✔": "OK", "✗": "x", "×": "x",
+    "⚠": "!", "️": "",
+    "\U0001f525": "*", "\U0001f4c8": "^", "\U0001f4c9": "v",
+    "\U0001f6a9": "!", "\U0001f53a": "^", "\U0001f53b": "v",
+    "❓": "?", "▲": "^", "▼": "v",
+}
+_ASCII_TABLE = str.maketrans(_ASCII_SUBS)
+
+
 # ── Run logging ───────────────────────────────────────────────────────────────
 class _Tee:
-    """Fan writes out to several streams at once (console + log file)."""
+    """Fan writes out to several streams at once (console + log file),
+    transliterating to ASCII first when ASCII_OUTPUT is on."""
 
-    def __init__(self, *streams):
+    def __init__(self, *streams, ascii_only: bool = False):
         self._streams = streams
+        self._ascii   = ascii_only
 
     def write(self, data):
+        if self._ascii:
+            data = data.translate(_ASCII_TABLE)
         for s in self._streams:
             s.write(data)
 
@@ -95,6 +121,17 @@ def load_tickers_file(path: str) -> list[str]:
     if not tickers:
         sys.exit(f"No tickers found in {path}")
     return tickers
+
+
+def resolve_ascii(flag: bool) -> bool:
+    """Decide whether to emit plain ASCII: explicit --ascii, the
+    STOCK_SCREENER_ASCII env var, a dumb/unset TERM, or a stdout encoding
+    that isn't UTF-8 (redirected to a file, a legacy locale, …)."""
+    if flag or os.environ.get("STOCK_SCREENER_ASCII"):
+        return True
+    if (os.environ.get("TERM") or "").lower() == "dumb":
+        return True
+    return "utf" not in (getattr(sys.stdout, "encoding", "") or "utf-8").lower()
 
 
 def _open_run_log(log_dir: str = "logs"):
@@ -674,6 +711,10 @@ def run_screen(
     results = []
     total   = len(tickers)
     icons   = {
+        "buy": "[BUY] ", "undervalued": "[UV]  ", "oversold": "[OS]  ",
+        "sell": "[SELL]", "overvalued": "[OV]  ", "overbought": "[OB]  ",
+        "mixed": "[MIX] ", "neutral": "      ", "hold": "[HOLD]",
+    } if ASCII_OUTPUT else {
         "buy": "🔥", "undervalued": "📉", "oversold": "⚠️",
         "sell": "🚩", "overvalued": "📈", "overbought": "🔺",
         "mixed": "❓", "neutral": "  ", "hold": "  ",
@@ -962,11 +1003,16 @@ Examples:
   python3 stock_screener.py --tickers-file watchlist.txt
   python3 stock_screener.py --tickers-file mixed.txt --asset-type etf   # ETFs only
   python3 stock_screener.py --tickers VOO QQQ SMH --signal hold
+  python3 stock_screener.py --index sp500 --signal sell --ascii   # no emoji
   python3 stock_screener.py --list-indices
 
 ETFs / funds are auto-detected and screened on price-vs-NAV, holdings P/E vs
 category, and the usual RSI / trend signals. Every run is mirrored to a
 timestamped log in ./logs/ (override with --log-dir).
+
+--ascii swaps the emoji status icons for [BUY]/[SELL]/… tags (handy on Linux
+without a color-emoji font); it auto-enables on a dumb / non-UTF-8 terminal or
+when STOCK_SCREENER_ASCII is set.
         """
     )
     parser.add_argument("--index",   choices=list(INDICES.keys()), default=None,
@@ -995,6 +1041,10 @@ timestamped log in ./logs/ (override with --log-dir).
                              "use a literal {index} in the name to place it yourself")
     parser.add_argument("--log-dir", type=str, default="logs", metavar="DIR",
                         help="Directory for timestamped run logs (default: ./logs)")
+    parser.add_argument("--ascii", action="store_true",
+                        help="Plain-ASCII output: replace emoji status icons with [BUY]/[SELL]/… "
+                             "tags and box-drawing with -/=. Auto-enabled on a non-UTF-8 or "
+                             "dumb terminal, or when STOCK_SCREENER_ASCII is set.")
     parser.add_argument("--list-indices", action="store_true",
                         help="Show available indices and exit")
     args = parser.parse_args()
@@ -1007,10 +1057,13 @@ timestamped log in ./logs/ (override with --log-dir).
         print()
         return
 
+    global ASCII_OUTPUT
+    ASCII_OUTPUT = resolve_ascii(args.ascii)
+
     # ── Start run log: mirror everything to ./logs/screener_<timestamp>.log ──
     log_file, log_path = _open_run_log(args.log_dir)
-    sys.stdout = _Tee(sys.__stdout__, log_file)
-    sys.stderr = _Tee(sys.__stderr__, log_file)
+    sys.stdout = _Tee(sys.__stdout__, log_file, ascii_only=ASCII_OUTPUT)
+    sys.stderr = _Tee(sys.__stderr__, log_file, ascii_only=ASCII_OUTPUT)
 
     try:
         # Resolve ticker list
