@@ -15,3 +15,6 @@ my-*.txt
 *-tickers.txt
 tickers*.txt
 watchlist*.txt
+
+# personal runner (copy run-scanner.sh to run-my-scanner.sh)
+run-my-*.sh
