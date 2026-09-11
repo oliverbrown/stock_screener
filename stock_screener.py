@@ -431,6 +431,10 @@ def fetch_stock(ticker: str) -> dict | None:
         dte    = info.get("debtToEquity")          # already expressed as a percentage
         margin = info.get("profitMargins")         # fraction, e.g. -0.05
 
+        # ── Dividend yield & short interest (stocks; sparsely populated for funds) ──
+        div_yield = info.get("dividendYield")          # already a percentage, e.g. 2.42
+        pct_short = info.get("shortPercentOfFloat")    # fraction, e.g. 0.0096
+
         # ── Fund-only fields ────────────────────────────────────────────────
         nav      = info.get("navPrice")
         nav_prem = round((price / nav - 1) * 100, 2) if nav else None
@@ -461,6 +465,8 @@ def fetch_stock(ticker: str) -> dict | None:
             "pct_off_low":  pct_off_low,
             "debt_equity":  round(float(dte), 0)        if dte    is not None else None,
             "margin":       round(float(margin) * 100, 1) if margin is not None else None,
+            "div_yield":    round(float(div_yield), 2) if div_yield is not None else None,
+            "pct_short":    round(float(pct_short) * 100, 2) if pct_short is not None else None,
             "nav_premium":  nav_prem,
             "expense":      round(float(expense), 2) if expense is not None else None,
             "fund_yield":   round(float(fyield) * 100, 2) if fyield is not None else None,
@@ -803,6 +809,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         ma200_s = f"{s['pct_vs_200']:+.0f}% vs 200DMA" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
         lo_s    = f"{s['pct_off_low']:+.0f}%"  if s["pct_off_low"]  is not None else "N/A"
+        short_s = f"{s['pct_short']:.1f}% of float" if s["pct_short"] is not None else "N/A"
         sig_s   = labels.get(s["signal"], s["signal"].upper())
 
         if s["is_fund"]:
@@ -817,7 +824,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
             print(f"  Hold P/E: {pe_s:<16} RSI   : {rsi_s}")
             print(f"  Trend   : {ma200_s:<16} 52wk  : {lo_s} from low / {hi_s} from high")
             print(f"  Expense : {exp_s:<16} Beta  : {beta_s}")
-            print(f"  Category: {s['category'] or '—'}")
+            print(f"  Short   : {short_s:<16} Category: {s['category'] or '—'}")
             print(f"  Signal  : {sig_s}")
             print(f"  {s['thesis']}")
             continue
@@ -826,6 +833,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"   if s["debt_equity"]  is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"        if s["margin"]       is not None else "N/A"
+        dy_s    = f"{s['div_yield']:.2f}%"     if s["div_yield"]    is not None else "N/A"
         print(f"\n  {s['ticker']:6}  {s['name']}")
         print(f"  {'─' * (W - 2)}")
         print(f"  Price  : ${s['price']:<10.2f}  Today : {chg_s}")
@@ -833,6 +841,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  PEG    : {peg_s:<10}  RSI   : {rsi_s}")
         print(f"  Trend  : {ma200_s:<15}  52wk  : {lo_s} from low / {hi_s} from high")
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
+        print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
         print(f"  Sector : {s['sector']}")
         print(f"  Signal : {sig_s}")
         print(f"  {s['thesis']}")
@@ -864,6 +873,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         rsi_s   = str(s["rsi"]) if s["rsi"] is not None else "N/A"
         ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
+        short_s = f"{s['pct_short']:.1f}%" if s["pct_short"] is not None else "N/A"
 
         if s["is_fund"]:
             nav_s  = f"{s['nav_premium']:+.2f}%" if s["nav_premium"] is not None else "N/A"
@@ -889,6 +899,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Off 52w high</div><div class="mv">{hi_s}</div></div>
             <div><div class="ml">Expense ratio</div><div class="mv">{exp_s}</div></div>
             <div><div class="ml">Beta (3y)</div><div class="mv">{beta_s}</div></div>
+            <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -899,6 +910,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"  if s["debt_equity"] is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"       if s["margin"]      is not None else "N/A"
+        dy_s    = f"{s['div_yield']:.2f}%"    if s["div_yield"]   is not None else "N/A"
         cards += f"""
         <div class="card">
           <div class="card-top">
@@ -917,6 +929,8 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Off 52w high</div><div class="mv">{hi_s}</div></div>
             <div><div class="ml">Debt / equity</div><div class="mv">{dte_s}</div></div>
             <div><div class="ml">Profit margin</div><div class="mv">{mgn_s}</div></div>
+            <div><div class="ml">Dividend yield</div><div class="mv">{dy_s}</div></div>
+            <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
