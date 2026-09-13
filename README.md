@@ -1,5 +1,7 @@
 # stock_screener
 
+[![CI](https://github.com/oliverbrown/stock_screener/actions/workflows/ci.yml/badge.svg)](https://github.com/oliverbrown/stock_screener/actions/workflows/ci.yml)
+
 A no-API-key stock/ETF screener. Pulls live data from Yahoo Finance via
 [`yfinance`](https://github.com/ranaroussi/yfinance) and flags names as
 **undervalued / oversold** (buy side) or **overvalued / overbought /

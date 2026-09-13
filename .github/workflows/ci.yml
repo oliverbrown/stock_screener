@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install yfinance pandas
+
+      - name: Compile check
+        run: python3 -m py_compile stock_screener.py
+
+      - name: --help smoke test
+        run: python3 stock_screener.py --help
+
+      - name: --list-indices smoke test
+        run: python3 stock_screener.py --list-indices
+
+      - name: --tickers-file smoke test (no network calls)
+        run: |
+          printf 'AAPL, MSFT\nGOOGL\n' > /tmp/smoke.txt
+          python3 - <<'EOF'
+          from stock_screener import load_tickers_file
+          assert load_tickers_file("/tmp/smoke.txt") == ["AAPL", "MSFT", "GOOGL"]
+          print("parse_tickers/load_tickers_file OK")
+          EOF
