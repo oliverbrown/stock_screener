@@ -1,6 +1,7 @@
 # stock_screener
 
 [![CI](https://github.com/oliverbrown/stock_screener/actions/workflows/ci.yml/badge.svg)](https://github.com/oliverbrown/stock_screener/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A no-API-key stock/ETF screener. Pulls live data from Yahoo Finance via
 [`yfinance`](https://github.com/ranaroussi/yfinance) and flags names as
