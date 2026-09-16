@@ -50,15 +50,6 @@ import urllib.request
 import warnings
 from datetime import datetime
 
-# yfinance's history scraper creates an empty pd.Series() with no dtype on
-# some tickers (e.g. no capital-gains history) — a harmless pandas
-# deprecation notice, not an actual problem with the data.
-warnings.filterwarnings(
-    "ignore",
-    message="The default dtype for empty Series",
-    category=DeprecationWarning,
-)
-
 try:
     import yfinance as yf
     import pandas as pd
@@ -66,6 +57,17 @@ except ImportError:
     print("Missing dependencies. Run:  pip install yfinance pandas")
     sys.exit(1)
 
+# yfinance's own __init__ re-enables DeprecationWarning for its module
+# (warnings.filterwarnings('default', ..., module='^yfinance')), which is
+# added *after* any filter set before the import and so takes precedence.
+# Register ours after importing so it wins: its history scraper creates an
+# empty pd.Series() with no dtype on some tickers (e.g. no capital-gains
+# history) — a harmless pandas deprecation notice, not a real problem.
+warnings.filterwarnings(
+    "ignore",
+    message="The default dtype for empty Series",
+    category=DeprecationWarning,
+)
 
 # ── Output mode ───────────────────────────────────────────────────────────────
 # Emoji status icons render on macOS out of the box but need a color-emoji font
