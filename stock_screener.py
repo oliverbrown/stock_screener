@@ -47,7 +47,17 @@ import re
 import time
 import random
 import urllib.request
+import warnings
 from datetime import datetime
+
+# yfinance's history scraper creates an empty pd.Series() with no dtype on
+# some tickers (e.g. no capital-gains history) — a harmless pandas
+# deprecation notice, not an actual problem with the data.
+warnings.filterwarnings(
+    "ignore",
+    message="The default dtype for empty Series",
+    category=DeprecationWarning,
+)
 
 try:
     import yfinance as yf
