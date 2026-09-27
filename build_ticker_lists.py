@@ -20,7 +20,6 @@ Usage:
     python3 build_ticker_lists.py --list           # show available lists
     python3 build_ticker_lists.py --all-securities  # exchanges incl. warrants,
                                                     # preferreds, units, notes
-    python3 build_ticker_lists.py russell2000 --russell2000-csv ~/Downloads/IWM_holdings.csv
 """
 
 import argparse
@@ -36,7 +35,7 @@ INDEX_LISTS = {
     "sp600":       "S&P SmallCap 600",
     "nasdaq100":   "Nasdaq-100",
     "dow30":       "Dow Jones Industrial Average (Dow 30)",
-    "russell2000": "Russell 2000 (from an iShares IWM holdings CSV)",
+    "russell2000": "Russell 2000",
 }
 EXCHANGE_LISTS = {
     "nasdaq":        "Nasdaq-listed",
@@ -56,6 +55,7 @@ INDEX_SOURCES = {
     "sp600":       "Wikipedia, List of S&P 600 companies",
     "nasdaq100":   "Nasdaq (api.nasdaq.com index list)",
     "dow30":       "SPDR Dow Jones Industrial Average ETF (DIA) daily holdings",
+    "russell2000": "iShares Russell 2000 ETF (IWM) daily holdings",
 }
 EXCHANGE_SOURCE = "NASDAQ Trader symbol directory (nasdaqlisted.txt, otherlisted.txt)"
 
@@ -90,11 +90,6 @@ def main():
     parser.add_argument("--all-securities", action="store_true",
                         help="Exchange lists also include warrants, rights, units, "
                              "preferreds and notes (default: common stocks, ADRs and ETFs)")
-    parser.add_argument("--russell2000-csv", metavar="FILE",
-                        help="iShares IWM holdings CSV to build russell2000.txt from. "
-                             "Download it from the IWM fund page on ishares.com "
-                             "(Holdings tab -> Detailed Holdings and Analytics). "
-                             "iShares blocks automated downloads, so this can't be fetched.")
     parser.add_argument("--list", action="store_true", help="Show available lists and exit")
     args = parser.parse_args()
 
@@ -112,19 +107,15 @@ def main():
     if unknown:
         parser.error(f"unknown list(s): {', '.join(unknown)}  (see --list)")
     wanted = args.lists or list(ALL_LISTS)
-    if "russell2000" in wanted and not args.russell2000_csv:
-        if args.lists:
-            parser.error("russell2000 needs --russell2000-csv FILE (see --help)")
-        wanted.remove("russell2000")
-        print("  - russell2000  skipped (needs --russell2000-csv; see --help)")
 
     os.makedirs(args.out_dir, exist_ok=True)
     failures = 0
 
     # Exchange listings: one download covers every exchange list, and also
     # supplies clean company names for index sources that only give UPPERCASE.
+    UPPERCASE_SOURCES = ("dow30", "russell2000")
     listings, names = None, {}
-    if any(k in EXCHANGE_LISTS for k in wanted) or "dow30" in wanted:
+    if any(k in EXCHANGE_LISTS or k in UPPERCASE_SOURCES for k in wanted):
         try:
             listings = ts.fetch_exchange_listings(all_securities=args.all_securities)
             names = {r["symbol"]: r["name"] for r in listings}
@@ -153,12 +144,9 @@ def main():
                          else "common stocks, ADRs and ETFs; no warrants, rights, units, "
                               "preferreds or notes")
                 done(key, [(r["symbol"], r["name"]) for r in sel], EXCHANGE_SOURCE, kinds)
-            elif key == "russell2000":
-                done(key, ts.parse_ishares_holdings(args.russell2000_csv),
-                     f"iShares Russell 2000 ETF (IWM) holdings file {os.path.basename(args.russell2000_csv)}")
             else:
                 rows = ts.INDEX_FETCHERS[key]()
-                if key == "dow30":                        # DIA gives UPPERCASE names
+                if key in UPPERCASE_SOURCES:
                     rows = [(s, names.get(s, n)) for s, n in rows]
                 done(key, rows, INDEX_SOURCES[key])
         except Exception as e:

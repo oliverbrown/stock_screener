@@ -108,9 +108,8 @@ python3 stock_screener.py --list-indices              # show what's available
 `--index` fetches the current members live (S&P 500 from Wikipedia,
 Nasdaq-100 from Nasdaq, Dow 30 from the SPDR DIA ETF's holdings), falling
 back to a bundled static list if that fails (shown in the output either
-way). The Russell 2000 has no free live source, so `--index russell2000`
-always uses a bundled 190-stock sample — for the full index, see
-[Reference ticker lists](#reference-ticker-lists).
+way). The Russell 2000 comes from the holdings of the iShares Russell 2000
+ETF (IWM); its offline fallback is only a 190-stock sample.
 
 `--tickers-file` reads symbols separated by **any mix** of whitespace,
 newlines, carriage returns, and/or commas. A `#` starts a comment that runs
@@ -165,21 +164,13 @@ python3 stock_screener.py --tickers-file ticker-lists/sp400.txt --signal buy
 | `sp500`, `sp400`, `sp600` | S&P 500 / MidCap 400 / SmallCap 600 | Wikipedia |
 | `nasdaq100` | Nasdaq-100 | Nasdaq |
 | `dow30` | Dow Jones Industrial Average | SPDR DIA ETF holdings |
-| `russell2000` | Russell 2000 | iShares IWM holdings CSV (see below) |
+| `russell2000` | Russell 2000 | iShares Russell 2000 ETF (IWM) holdings |
 | `nasdaq`, `nyse`, `nyse-american`, `nyse-arca`, `cboe` | Everything listed on that exchange | NASDAQ Trader symbol directory |
 | `us-stocks`, `us-etfs`, `us-all` | All US-listed stocks, ETFs, or both | NASDAQ Trader symbol directory |
 
 Exchange lists hold common stocks, ADRs and ETFs; add `--all-securities` to
 also include warrants, rights, SPAC units, preferreds and notes. Symbols are
 written in Yahoo's form (`BRK-B`, preferreds as `ABR-PD`).
-
-**Russell 2000:** iShares blocks automated downloads, so download the IWM
-holdings CSV in a browser (ishares.com → iShares Russell 2000 ETF →
-Holdings → *Detailed Holdings and Analytics*), then:
-
-```bash
-python3 build_ticker_lists.py russell2000 --russell2000-csv ~/Downloads/IWM_holdings.csv
-```
 
 Membership changes (index rebalances, IPOs, delistings), so re-run the
 script to refresh. The generated files are gitignored.

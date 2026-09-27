@@ -12,8 +12,7 @@ Sources (all free, no API key):
     S&P 500/400/600 Wikipedia constituent tables
     Nasdaq-100      Nasdaq's own index list (api.nasdaq.com)
     Dow 30          Daily holdings of the SPDR Dow Jones ETF (DIA)
-    Russell 2000    No free automated source; parse an iShares IWM holdings
-                    CSV downloaded in a browser (see parse_ishares_holdings)
+    Russell 2000    Holdings of the iShares Russell 2000 ETF (IWM)
 """
 
 import csv
@@ -86,6 +85,14 @@ _NON_COMMON = re.compile(
     r"|\bnotes? due\b|\bsenior notes\b|\bdebentures?\b|\bbaby bonds?\b",
     re.IGNORECASE,
 )
+# ...unless the name says it's common stock ("Preferred Bank - Common Stock").
+_COMMON = re.compile(r"(common stock|common shares|ordinary shares)(,? (par value|\$).*)?\s*$",
+                     re.IGNORECASE)
+
+
+def is_non_common(name: str) -> bool:
+    """True for warrants, rights, units, preferreds and notes."""
+    return bool(_NON_COMMON.search(name)) and not _COMMON.search(name)
 
 
 def _read_symdir(url: str) -> pd.DataFrame:
@@ -125,7 +132,7 @@ def fetch_exchange_listings(all_securities: bool = False) -> list[dict]:
             continue
         if not all_securities and not r["etf"]:
             # CQS suffixes: $ preferred, .U units, .W warrants, .R rights
-            if re.search(r"\$|\.(U|W|WS|R)$", r["raw"]) or _NON_COMMON.search(r["name"]):
+            if re.search(r"\$|\.(U|W|WS|R)$", r["raw"]) or is_non_common(r["name"]):
                 continue
         out.append({
             "symbol":   to_yahoo(r["raw"]),
@@ -177,19 +184,32 @@ def fetch_dow30() -> list[tuple[str, str]]:
     return out
 
 
-def parse_ishares_holdings(path: str) -> list[tuple[str, str]]:
-    """Equity holdings from an iShares fund holdings CSV (e.g. IWM for the
-    Russell 2000), as downloaded from the fund page's "Holdings" tab.
-    The file has a few lines of fund info before the "Ticker,Name,…" header."""
-    with open(path, encoding="utf-8-sig") as f:
-        lines = f.read().splitlines()
+IWM_HOLDINGS_URL = ("https://www.ishares.com/us/products/239710/"
+                    "ishares-russell-2000-etf/latest-holdings.csv")
+
+
+def parse_ishares_holdings(text: str) -> list[tuple[str, str]]:
+    """Listed equity holdings from an iShares fund holdings CSV. The file has
+    a few lines of fund info before the "Ticker,Name,…" header; share classes
+    are written with a space ("MOG A"); cash, futures, unlisted positions
+    (ticker "-", exchange "NO MARKET") and contingent value rights (CVRs,
+    left over from acquisitions and not exchange-traded) are skipped."""
+    lines = text.splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("Ticker,"))
     out = []
     for row in csv.DictReader(lines[start:]):
         tkr = (row.get("Ticker") or "").strip()
-        if (row.get("Asset Class") or "").strip() == "Equity" and re.fullmatch(r"[A-Z.]{1,6}", tkr):
-            out.append((to_yahoo(tkr), (row.get("Name") or "").strip()))
+        if ((row.get("Asset Class") or "").strip() == "Equity"
+                and not (row.get("Exchange") or "").upper().startswith("NO MARKET")
+                and not re.search(r"\bCVR\b", row.get("Name") or "")
+                and re.fullmatch(r"[A-Z]{1,6}([ .][A-Z])?", tkr)):
+            out.append((to_yahoo(tkr.replace(" ", ".")), (row.get("Name") or "").strip()))
     return out
+
+
+def fetch_russell2000() -> list[tuple[str, str]]:
+    """Russell 2000 members from the iShares Russell 2000 ETF (IWM) holdings."""
+    return parse_ishares_holdings(fetch_url(IWM_HOLDINGS_URL).decode("utf-8-sig"))
 
 
 INDEX_FETCHERS = {
@@ -198,4 +218,5 @@ INDEX_FETCHERS = {
     "sp600":     lambda: fetch_sp_index("sp600"),
     "nasdaq100": fetch_nasdaq100,
     "dow30":     fetch_dow30,
+    "russell2000": fetch_russell2000,
 }

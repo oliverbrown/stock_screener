@@ -66,9 +66,13 @@ def test_clean_name(raw, expected):
     ("Enterprise Products Partners L.P. Common Units",               False),
     ("Apple Inc. Common Stock",                                      False),
     ("Arm Holdings plc - American Depositary Shares",                False),
+    ("Preferred Bank - Common Stock",                                False),
+    ("First Rights Corp Common Stock, $0.01 par value",              False),
+    ("Ares Acquisition Corp III Units, each consisting of one Class A "
+     "ordinary share and one-tenth of one redeemable warrant",       True),
 ])
 def test_non_common_filter(name, non_common):
-    assert bool(ts._NON_COMMON.search(name)) is non_common
+    assert ts.is_non_common(name) is non_common
 
 
 # ── Written lists round-trip through the screener's parser ────────────────────
@@ -89,21 +93,23 @@ def test_write_list_round_trip(tmp_path):
 ISHARES_CSV = '''iShares Russell 2000 ETF
 Fund Holdings as of,"Sep 25, 2026"
 Inception Date,"May 22, 2000"
-Shares Outstanding,"300,000,000.00"
-\xa0
+Shares Outstanding,"273,950,000.00"
+Stock,"-"
+
 Ticker,Name,Sector,Asset Class,Market Value,Weight (%),Notional Value,Quantity,Price,Location,Exchange,Currency,FX Rate,Market Currency,Accrual Date
-"CRDO","CREDO TECHNOLOGY GROUP HOLDING LTD","Information Technology","Equity","1,000","0.50","1,000","10","100.00","United States","NASDAQ","USD","1.00","USD","-"
-"MOG.A","MOOG INC CLASS A","Industrials","Equity","900","0.40","900","5","180.00","United States","New York Stock Exchange Inc.","USD","1.00","USD","-"
+"TWST","TWIST BIOSCIENCE","Health Care","Equity","312,780,993.25","0.40","312,780,993.25","1,710,775.00","182.83","United States","NASDAQ","USD","1.00","USD","-"
+"MOG A","MOOG INC CLASS A","Industrials","Equity","286,960,753.80","0.37","286,960,753.80","739,971.00","387.80","United States","NYSE","USD","1.00","USD","-"
 "XTSLA","BLK CSH FND TREASURY SL AGENCY","Cash and/or Derivatives","Money Market","500","0.20","500","500","1.00","United States","-","USD","1.00","USD","-"
-"RTYZ6","RUSSELL 2000 EMINI DEC 26","Cash and/or Derivatives","Futures","0","0.10","0","1","0","United States","-","USD","1.00","USD","-"
+"-","OMNIAB INC $15.00 VESTING Prvt","Health Care","Equity","1.31","0.00","1.31","130,676.00","0.00","United States","NO MARKET (E.G. UNLISTED)","USD","1.00","USD","-"
+"CRDO","CREDO TECHNOLOGY","Information Technology","Equity","1","0.10","1","1","1","United States","NO MARKET (E.G. UNLISTED)","USD","1.00","USD","-"
+"AKE","AKERO THERAPEUTICS CVR","Health Care","Equity","0","0.00","0","1","0","United States","NASDAQ","USD","1.00","USD","-"
+"RTYZ6","RUSSELL 2000 EMINI CME DEC 26","Cash and/or Derivatives","Futures","0.00","0.00","287,359,650.00","2,010.00","2,859.30","-","Chicago Mercantile Exchange","USD","1.00","USD","-"
 '''
 
 
-def test_parse_ishares_holdings(tmp_path):
-    f = tmp_path / "IWM_holdings.csv"
-    f.write_text(ISHARES_CSV, encoding="utf-8")
-    assert ts.parse_ishares_holdings(str(f)) == [
-        ("CRDO", "CREDO TECHNOLOGY GROUP HOLDING LTD"),
+def test_parse_ishares_holdings():
+    assert ts.parse_ishares_holdings(ISHARES_CSV) == [
+        ("TWST", "TWIST BIOSCIENCE"),
         ("MOG-A", "MOOG INC CLASS A"),
     ]
 

@@ -330,8 +330,8 @@ SP500_TICKERS = [
     "XYL","YUM","ZBH","ZBRA","ZION","ZTS",
 ]
 
-# Russell 2000: too large to bundle fully (2000 tickers).
-# We include a representative 200-stock sample from the index.
+# Russell 2000: too large to bundle fully (~2000 tickers). --index russell2000
+# fetches the full list live; this small sample is only the offline fallback.
 RUSSELL2000_SAMPLE = [
     "ACLS","ACLX","ACMR","ACT","AEHR","AEYE","AGIO","AGYS","AIOT","AIRG",
     "AKRO","ALEC","ALGM","ALLO","ALNT","ALRM","AMBC","AMEH","AMKR","AMPH",
@@ -373,8 +373,8 @@ INDICES = {
         "static":  NASDAQ100_TICKERS,
     },
     "russell2000": {
-        "label":   "Russell 2000 (200-stock representative sample)",
-        "live":    False,  # no free source; see build_ticker_lists.py --russell2000-csv
+        "label":   "Russell 2000",
+        "live":    True,
         "static":  RUSSELL2000_SAMPLE,
     },
 }
