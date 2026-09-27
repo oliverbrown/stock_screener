@@ -174,9 +174,9 @@ log file. It auto-enables on a dumb or non-UTF-8 terminal, or when the
 
 ## Example runner
 
-[`run-screener.sh`](run-screenner.sh) is a runnable example that drives the
+[`run-screener.sh`](run-screener.sh) is a runnable example that drives the
 screener over indices and an inline watchlist. Copy it to
-`run-my-scanner.sh` (or any `run-my-*.sh` name — all gitignored) and point it at your own `--tickers-file`
+`run-my-screener.sh` (or any `run-my-*.sh` name — all gitignored) and point it at your own `--tickers-file`
 lists.
 
 ## Tests

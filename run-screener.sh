@@ -1,8 +1,8 @@
 #!/bin/bash
 #
-# run-scanner.sh — example runner for stock_screener.py
+# run-screener.sh — example runner for stock_screener.py
 #
-# Copy this to your own file (e.g. run-my-scanner.sh, which is gitignored via
+# Copy this to your own file (e.g. run-my-screener.sh, which is gitignored via
 # the my-* rules) and edit it to point at your own watchlists. This version
 # uses only built-in indices and inline tickers so it runs as-is.
 #
