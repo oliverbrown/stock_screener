@@ -9,6 +9,7 @@ venv/
 .venv/
 files.zip
 logs/
+ticker-lists/
 
 # personal ticker lists / watchlists
 my-tickers.txt

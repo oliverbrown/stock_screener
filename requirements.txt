@@ -2,3 +2,5 @@
 yfinance>=0.2.54   # Yahoo Finance data (YFRateLimitError added in 0.2.54)
 pandas>=2.0
 lxml               # used by pandas.read_html to load index lists from Wikipedia
+openpyxl           # used by pandas.read_excel to load Dow 30 members (DIA holdings)
+certifi            # CA certificates for HTTPS (python.org macOS installs lack them)

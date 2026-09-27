@@ -34,7 +34,9 @@ Usage:
     python3 stock_screener.py --index sp500            # all S&P 500 stocks
     python3 stock_screener.py --index dow30 --signal sell
     python3 stock_screener.py --tickers AAPL MSFT TSLA
-    python3 stock_screener.py --tickers-file watchlist.txt   # whitespace/comma/newline separated
+    python3 stock_screener.py --tickers-file watchlist.txt   # whitespace/comma/newline separated;
+                                                             # '#' starts a comment to end of line
+    python3 stock_screener.py --tickers-file ticker-lists/sp400.txt   # from build_ticker_lists.py
     python3 stock_screener.py --tickers-file mixed.txt --asset-type etf   # ETFs only
     python3 stock_screener.py --tickers VOO QQQ SMH --signal hold
     python3 stock_screener.py --index sp500 --signal sell --ascii   # plain-ASCII output
@@ -48,21 +50,20 @@ Requirements:
 import argparse
 import sys
 import os
-import io
 import logging
 import re
 import time
 import random
 import urllib.parse
-import urllib.request
 import warnings
 from datetime import datetime
 
 try:
     import yfinance as yf
     import pandas as pd
+    import ticker_sources
 except ImportError:
-    print("Missing dependencies. Run:  pip install yfinance pandas")
+    print("Missing dependencies. Run:  pip install -r requirements.txt")
     sys.exit(1)
 
 try:
@@ -138,8 +139,10 @@ def yahoo_symbol(sym: str) -> str:
 
 def parse_tickers(text: str) -> list[str]:
     """Split a blob of ticker symbols on any run of whitespace, newlines,
-    carriage returns, and/or commas. Upper-cased, share classes normalised
-    to Yahoo's form (BRK.B -> BRK-B), de-duplicated, order kept."""
+    carriage returns, and/or commas. A '#' starts a comment that runs to the
+    end of its line (e.g. "AAPL  # Apple Inc."). Upper-cased, share classes
+    normalised to Yahoo's form (BRK.B -> BRK-B), de-duplicated, order kept."""
+    text = "\n".join(line.split("#", 1)[0] for line in text.splitlines())
     seen, out = set(), []
     for tok in re.split(r"[,\s]+", text.strip()):
         sym = yahoo_symbol(tok) if tok.strip() else ""
@@ -260,7 +263,8 @@ DEFAULT_TICKERS = [
 ]
 
 # ── Bundled index tickers (static fallbacks) ──────────────────────────────────
-# These are refreshed via Wikipedia scraping at runtime when possible.
+# --index fetches the current members live (ticker_sources.py) when possible;
+# these are only used when that fails.
 # Last updated: mid-2025. Run --index <name> to get the live list.
 
 DOW30_TICKERS = [
@@ -355,28 +359,22 @@ RUSSELL2000_SAMPLE = [
 INDICES = {
     "sp500": {
         "label":   "S&P 500",
-        "wiki":    "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        "table":   0,
-        "col":     "Symbol",
+        "live":    True,
         "static":  SP500_TICKERS,
     },
     "dow30": {
         "label":   "Dow Jones Industrial Average (Dow 30)",
-        "wiki":    "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
-        "table":   1,
-        "col":     "Symbol",
+        "live":    True,
         "static":  DOW30_TICKERS,
     },
     "nasdaq100": {
         "label":   "NASDAQ-100",
-        "wiki":    "https://en.wikipedia.org/wiki/Nasdaq-100",
-        "table":   4,
-        "col":     "Ticker",
+        "live":    True,
         "static":  NASDAQ100_TICKERS,
     },
     "russell2000": {
         "label":   "Russell 2000 (200-stock representative sample)",
-        "wiki":    None,   # no reliable Wikipedia table
+        "live":    False,  # no free source; see build_ticker_lists.py --russell2000-csv
         "static":  RUSSELL2000_SAMPLE,
     },
 }
@@ -384,28 +382,18 @@ INDICES = {
 
 # ── Index loader ──────────────────────────────────────────────────────────────
 def load_index(name: str) -> list[str]:
-    """Return constituent tickers for a named index. Tries Wikipedia first,
-    falls back to the bundled static list."""
+    """Return constituent tickers for a named index. Fetches the current list
+    live (see ticker_sources.py), falling back to the bundled static list."""
     idx = INDICES[name]
-    wiki_url = idx.get("wiki")
 
-    if wiki_url:
+    if idx.get("live"):
         try:
-            req = urllib.request.Request(
-                wiki_url,
-                headers={"User-Agent": "Mozilla/5.0 (stock-screener/1.0)"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as r:
-                html = r.read()
-            tables = pd.read_html(io.BytesIO(html))
-            tbl    = tables[idx["table"]]
-            col    = idx["col"]
-            tickers = tbl[col].str.replace(".", "-", regex=False).dropna().tolist()
+            tickers = [sym for sym, _ in ticker_sources.INDEX_FETCHERS[name]()]
             if tickers:
-                print(f"  ✓ Loaded {len(tickers)} tickers live from Wikipedia ({idx['label']})")
+                print(f"  ✓ Loaded {len(tickers)} current tickers ({idx['label']})")
                 return tickers
         except Exception as e:
-            print(f"  ⚠ Wikipedia fetch failed ({e}), using bundled list.")
+            print(f"  ⚠ Live index fetch failed ({e}), using bundled list.")
 
     static = idx["static"]
     print(f"  Using bundled list: {len(static)} tickers ({idx['label']})")
@@ -1202,7 +1190,8 @@ when STOCK_SCREENER_ASCII is set.
                         help="Custom space-separated tickers (overrides --index and default list)")
     parser.add_argument("--tickers-file", type=str, default=None, metavar="FILE",
                         help="Read tickers from a file, separated by any whitespace, "
-                             "newlines, carriage returns, and/or commas "
+                             "newlines, carriage returns, and/or commas; '#' starts a "
+                             "comment to the end of the line "
                              "(overrides --index; --tickers wins over this)")
     parser.add_argument("--signal",
                         choices=["flagged", "buy", "sell", "hold", "all",

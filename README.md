@@ -105,21 +105,32 @@ python3 stock_screener.py --tickers-file watchlist.txt
 python3 stock_screener.py --list-indices              # show what's available
 ```
 
-`--index` tries to scrape the current constituent list from Wikipedia first,
-falling back to a bundled static list if that fails (shown in the output
-either way).
+`--index` fetches the current members live (S&P 500 from Wikipedia,
+Nasdaq-100 from Nasdaq, Dow 30 from the SPDR DIA ETF's holdings), falling
+back to a bundled static list if that fails (shown in the output either
+way). The Russell 2000 has no free live source, so `--index russell2000`
+always uses a bundled 190-stock sample — for the full index, see
+[Reference ticker lists](#reference-ticker-lists).
 
 `--tickers-file` reads symbols separated by **any mix** of whitespace,
-newlines, carriage returns, and/or commas:
+newlines, carriage returns, and/or commas. A `#` starts a comment that runs
+to the end of the line, so you can annotate a list:
 
 ```
 AAPL, MSFT GOOGL
 TSLA	NVDA,,amzn
+
+# Energy
+XOM     # Exxon Mobil
+CVX     # Chevron
 ```
 
 Share-class tickers can be written either way — `BRK.B` and `BF.B` are
 converted to Yahoo's `BRK-B` / `BF-B` form automatically. Exchange suffixes
 such as `SHOP.TO` or `VOD.L` are left alone.
+
+Precedence when more than one is given: `--tickers` > `--tickers-file` >
+`--index` > default watchlist.
 
 ### Skipped tickers
 
@@ -129,8 +140,49 @@ ticker is listed again at the end of the fetch. If Yahoo rate-limits a
 request, the screener waits and retries (10s, 30s, then 60s) before giving
 up on that ticker.
 
-Precedence when more than one is given: `--tickers` > `--tickers-file` >
-`--index` > default watchlist.
+## Reference ticker lists
+
+[`build_ticker_lists.py`](build_ticker_lists.py) downloads the current
+members of the major US indices and every US exchange listing, and writes
+one file per list to `./ticker-lists/`, one ticker per line with its name as
+a comment:
+
+```
+AAPL   # Apple Inc.
+AMGN   # Amgen Inc.
+BRK-B  # Berkshire Hathaway
+```
+
+```bash
+python3 build_ticker_lists.py                 # build every list
+python3 build_ticker_lists.py sp400 nyse       # just these
+python3 build_ticker_lists.py --list           # show what's available
+python3 stock_screener.py --tickers-file ticker-lists/sp400.txt --signal buy
+```
+
+| List | Contents | Source |
+|---|---|---|
+| `sp500`, `sp400`, `sp600` | S&P 500 / MidCap 400 / SmallCap 600 | Wikipedia |
+| `nasdaq100` | Nasdaq-100 | Nasdaq |
+| `dow30` | Dow Jones Industrial Average | SPDR DIA ETF holdings |
+| `russell2000` | Russell 2000 | iShares IWM holdings CSV (see below) |
+| `nasdaq`, `nyse`, `nyse-american`, `nyse-arca`, `cboe` | Everything listed on that exchange | NASDAQ Trader symbol directory |
+| `us-stocks`, `us-etfs`, `us-all` | All US-listed stocks, ETFs, or both | NASDAQ Trader symbol directory |
+
+Exchange lists hold common stocks, ADRs and ETFs; add `--all-securities` to
+also include warrants, rights, SPAC units, preferreds and notes. Symbols are
+written in Yahoo's form (`BRK-B`, preferreds as `ABR-PD`).
+
+**Russell 2000:** iShares blocks automated downloads, so download the IWM
+holdings CSV in a browser (ishares.com → iShares Russell 2000 ETF →
+Holdings → *Detailed Holdings and Analytics*), then:
+
+```bash
+python3 build_ticker_lists.py russell2000 --russell2000-csv ~/Downloads/IWM_holdings.csv
+```
+
+Membership changes (index rebalances, IPOs, delistings), so re-run the
+script to refresh. The generated files are gitignored.
 
 ## Filtering
 
