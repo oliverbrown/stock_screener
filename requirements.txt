@@ -1,0 +1,4 @@
+# Runtime dependencies for stock_screener.py
+yfinance>=0.2.54   # Yahoo Finance data (YFRateLimitError added in 0.2.54)
+pandas>=2.0
+lxml               # used by pandas.read_html to load index lists from Wikipedia

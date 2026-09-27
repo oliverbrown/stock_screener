@@ -20,7 +20,7 @@ other funds.
 ## Requirements
 
 ```bash
-pip install yfinance pandas
+pip install -r requirements.txt
 ```
 
 Python 3.10+.
@@ -178,6 +178,19 @@ log file. It auto-enables on a dumb or non-UTF-8 terminal, or when the
 screener over indices and an inline watchlist. Copy it to
 `run-my-scanner.sh` (or any `run-my-*.sh` name — all gitignored) and point it at your own `--tickers-file`
 lists.
+
+## Tests
+
+The signal rules, ticker parsing, output naming, RSI, rate-limit retries and
+filters are covered by an offline test suite (no network calls — Yahoo is
+faked):
+
+```bash
+pip install -r requirements-dev.txt
+python3 -m pytest
+```
+
+CI runs it on Python 3.10–3.12 for every push and pull request.
 
 ## Disclaimer
 

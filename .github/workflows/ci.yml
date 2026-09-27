@@ -22,7 +22,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: pip install yfinance pandas
+        run: pip install -r requirements-dev.txt
 
       - name: Compile check
         run: python3 -m py_compile stock_screener.py
@@ -33,11 +33,5 @@ jobs:
       - name: --list-indices smoke test
         run: python3 stock_screener.py --list-indices
 
-      - name: --tickers-file smoke test (no network calls)
-        run: |
-          printf 'AAPL, MSFT\nGOOGL\n' > /tmp/smoke.txt
-          python3 - <<'EOF'
-          from stock_screener import load_tickers_file
-          assert load_tickers_file("/tmp/smoke.txt") == ["AAPL", "MSFT", "GOOGL"]
-          print("parse_tickers/load_tickers_file OK")
-          EOF
+      - name: Unit tests (offline)
+        run: python3 -m pytest -q
