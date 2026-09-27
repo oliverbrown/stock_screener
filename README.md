@@ -57,8 +57,12 @@ stock also has high debt/equity (>200%) or a negative profit margin — cheap
 for a reason, not a bargain.
 
 Every stock row also shows: P/E, P/B, PEG, RSI, 50/200-day trend, distance
-from its 52-week high/low, debt/equity, profit margin, dividend yield, and
-short interest (% of float).
+from its 52-week high/low, debt/equity, profit margin, dividend yield, short
+interest (% of float), and the analysts' **1-year consensus price target**
+(Yahoo's "1y Target Est" — the mean target) with upside/downside vs. the
+current price, the low–high target range, the number of analysts, and their
+consensus rating (e.g. `buy`). These are shown for context only; they don't
+feed into the signal.
 
 ### ETFs and other funds
 
@@ -76,6 +80,14 @@ above 0.75% (and notes a cost watch above 0.50%).
 
 Every fund row also shows: price vs. NAV, holdings P/E, RSI, 50/200-day
 trend, 52-week range, expense ratio, distribution yield, and 3-year beta.
+
+### Pre-market / after-hours price
+
+While the pre-market (4:00–9:30am ET) or after-hours (4:00–8:00pm ET)
+session is open, stocks and ETFs also show the extended-hours price and its
+% change from the regular close — e.g. `Post-mkt: $341.46 (+0.11%)`. Outside
+those sessions nothing extra is shown. Signals always use the
+regular-session price.
 
 Non-ETF, non-equity tickers (crypto, futures, …) route through the fund path
 too and degrade gracefully to RSI/trend/52-week signals only.
@@ -100,6 +112,18 @@ newlines, carriage returns, and/or commas:
 AAPL, MSFT GOOGL
 TSLA	NVDA,,amzn
 ```
+
+Share-class tickers can be written either way — `BRK.B` and `BF.B` are
+converted to Yahoo's `BRK-B` / `BF-B` form automatically. Exchange suffixes
+such as `SHOP.TO` or `VOD.L` are left alone.
+
+### Skipped tickers
+
+A ticker that can't be screened is marked `skipped` with the reason (e.g.
+`no price data (unknown, delisted, or mistyped ticker?)`), and every skipped
+ticker is listed again at the end of the fetch. If Yahoo rate-limits a
+request, the screener waits and retries (10s, 30s, then 60s) before giving
+up on that ticker.
 
 Precedence when more than one is given: `--tickers` > `--tickers-file` >
 `--index` > default watchlist.
@@ -130,6 +154,9 @@ the index name is folded into the filename automatically:
 place it yourself (`report-{index}.html`), or omit `--index` to leave the
 name untouched.
 
+Each ticker in the HTML report links to its Yahoo Finance quote page
+(opens in a new tab).
+
 ## Logs
 
 Every run is mirrored — console output, unmodified — to a uniquely named,
@@ -147,9 +174,9 @@ log file. It auto-enables on a dumb or non-UTF-8 terminal, or when the
 
 ## Example runner
 
-[`run-scanner.sh`](run-scanner.sh) is a runnable example that drives the
+[`run-screener.sh`](run-screenner.sh) is a runnable example that drives the
 screener over indices and an inline watchlist. Copy it to
-`run-my-scanner.sh` (gitignored) and point it at your own `--tickers-file`
+`run-my-scanner.sh` (or any `run-my-*.sh` name — all gitignored) and point it at your own `--tickers-file`
 lists.
 
 ## Disclaimer
