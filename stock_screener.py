@@ -103,7 +103,7 @@ _ASCII_SUBS = {
     "✓": "OK", "✔": "OK", "✗": "x", "×": "x",
     "⚠": "!", "️": "",
     "\U0001f525": "*", "\U0001f4c8": "^", "\U0001f4c9": "v",
-    "\U0001f6a9": "!", "\U0001f53a": "^", "\U0001f53b": "v",
+    "\U0001f6a9": "!", "\U0001f680": "^", "\U0001f53a": "^", "\U0001f53b": "v",
     "❓": "?", "▲": "^", "▼": "v",
 }
 _ASCII_TABLE = str.maketrans(_ASCII_SUBS)
@@ -653,7 +653,8 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
                  "undervalued" if is_undervalued else "oversold"
     elif sell:
         signal = "sell" if (is_overvalued and (is_overbought or is_overextended)) else \
-                 "overvalued" if is_overvalued else "overbought"
+                 "overvalued" if is_overvalued else \
+                 "overbought" if is_overbought else "overextended"
     else:
         signal = "neutral"
 
@@ -762,7 +763,8 @@ def classify_fund(fund: dict, max_pe: float | None) -> tuple[str, list[str], str
                  "undervalued" if is_undervalued else "oversold"
     elif sell:
         signal = "sell" if (is_overvalued and (is_overbought or is_overextended)) else \
-                 "overvalued" if is_overvalued else "overbought"
+                 "overvalued" if is_overvalued else \
+                 "overbought" if is_overbought else "overextended"
     else:
         signal = "hold"
 
@@ -824,10 +826,12 @@ def run_screen(
     icons   = {
         "buy": "[BUY] ", "undervalued": "[UV]  ", "oversold": "[OS]  ",
         "sell": "[SELL]", "overvalued": "[OV]  ", "overbought": "[OB]  ",
+        "overextended": "[OX]  ",
         "mixed": "[MIX] ", "neutral": "      ", "hold": "[HOLD]",
     } if ASCII_OUTPUT else {
         "buy": "🔥", "undervalued": "📉", "oversold": "⚠️",
         "sell": "🚩", "overvalued": "📈", "overbought": "🔺",
+        "overextended": "🚀",
         "mixed": "❓", "neutral": "  ", "hold": "  ",
     }
 
@@ -909,6 +913,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         "sell":        "SELL — OVERVALUED + STRETCHED",
         "overvalued":  "OVERVALUED",
         "overbought":  "OVERBOUGHT",
+        "overextended": "OVEREXTENDED",
         "mixed":       "MIXED SIGNALS",
         "neutral":     "NEUTRAL",
         "hold":        "HOLD",
@@ -992,6 +997,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         "sell":        ("Sell signal",  "#fef2f2", "#dc2626"),
         "overvalued":  ("Overvalued",   "#fdf2f8", "#db2777"),
         "overbought":  ("Overbought",   "#fff7ed", "#ea580c"),
+        "overextended": ("Overextended", "#fefce8", "#a16207"),
         "mixed":       ("Mixed",        "#f5f3ff", "#7c3aed"),
         "neutral":     ("Neutral",      "#f5f5f3", "#6b6b67"),
         "hold":        ("Hold",         "#f5f5f3", "#6b6b67"),
@@ -1171,6 +1177,7 @@ Examples:
   python3 stock_screener.py --index sp500              # all ~500 S&P stocks
   python3 stock_screener.py --index sp500 --signal sell    # trim candidates
   python3 stock_screener.py --index nasdaq100 --signal overbought
+  python3 stock_screener.py --index sp500 --signal overextended
   python3 stock_screener.py --index sp500 --signal oversold --max-pe 20
   python3 stock_screener.py --index sp500 --output daily.html   # -> daily-sp500.html
   python3 stock_screener.py --tickers AAPL MSFT TSLA --output report.html
@@ -1199,7 +1206,8 @@ when STOCK_SCREENER_ASCII is set.
                              "(overrides --index; --tickers wins over this)")
     parser.add_argument("--signal",
                         choices=["flagged", "buy", "sell", "hold", "all",
-                                 "undervalued", "oversold", "overvalued", "overbought"],
+                                 "undervalued", "oversold", "overvalued", "overbought",
+                                 "overextended"],
                         default="flagged",
                         help="Which signals to include (default: flagged = any non-neutral; "
                              "buy = undervalued/oversold; sell = overvalued/overbought/overextended; "

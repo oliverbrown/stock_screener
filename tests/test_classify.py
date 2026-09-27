@@ -117,9 +117,13 @@ class TestStockSignals:
     def test_overextended_above_200dma(self):
         signal, tags, thesis = classify_signal(make_stock(pct_vs_200=25.0), None)
         assert tags == ["overextended"]
-        # There's no separate "overextended" headline; it reports as overbought.
-        assert signal == "overbought"
+        assert signal == "overextended"
         assert "+25% above its 200-day average" in thesis
+
+    def test_overbought_and_overextended_reads_overbought(self):
+        signal, tags, _ = classify_signal(make_stock(rsi=75.0, pct_vs_200=25.0), None)
+        assert signal == "overbought"
+        assert tags == ["overbought", "overextended"]
 
     def test_not_overextended_at_20_pct(self):
         assert classify_signal(make_stock(pct_vs_200=20.0), None)[0] == "neutral"
@@ -217,4 +221,7 @@ class TestFundSignals:
     def test_overextended_fund(self):
         signal, tags, _ = classify_fund(make_fund(pct_vs_200=25.0), None)
         assert tags == ["overextended"]
-        assert signal == "overbought"
+        assert signal == "overextended"
+
+    def test_overbought_and_overextended_fund_reads_overbought(self):
+        assert classify_fund(make_fund(rsi=75.0, pct_vs_200=25.0), None)[0] == "overbought"

@@ -9,7 +9,7 @@
 # Every run also writes a timestamped copy of its console output to ./logs/.
 #
 #   --signal   flagged | buy | sell | hold | all
-#              | undervalued | oversold | overvalued | overbought
+#              | undervalued | oversold | overvalued | overbought | overextended
 #   --asset-type  all | stock | etf        (auto-detected per ticker)
 #   --ascii       plain-text icons (no emoji) — for terminals without an
 #                 emoji font; also auto-enables when STOCK_SCREENER_ASCII is set

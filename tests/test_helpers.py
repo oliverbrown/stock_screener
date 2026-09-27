@@ -170,6 +170,7 @@ def _row(ticker, quote_type="EQUITY", **fields):
 UNIVERSE = {
     "CHEAP": _row("CHEAP", pe=20.0),                       # undervalued
     "HOT":   _row("HOT", rsi=75.0),                        # overbought
+    "RUN":   _row("RUN", pct_vs_200=25.0),                 # overextended
     "MEH":   _row("MEH"),                                  # neutral
     "FUND":  _row("FUND", "ETF", pe=21.0, nav_premium=-2.0),  # undervalued ETF
     "IDX":   _row("IDX", "MUTUALFUND", pe=21.0),           # hold, not an ETF
@@ -189,23 +190,42 @@ def _screen(signal="all", asset_type="all"):
 
 
 @pytest.mark.parametrize("signal, expected", [
-    ("all",         ["CHEAP", "HOT", "MEH", "FUND", "IDX"]),
-    ("flagged",     ["CHEAP", "HOT", "FUND"]),
-    ("buy",         ["CHEAP", "FUND"]),
-    ("sell",        ["HOT"]),
-    ("hold",        ["MEH", "IDX"]),
-    ("overbought",  ["HOT"]),
-    ("undervalued", ["CHEAP", "FUND"]),
+    ("all",          ["CHEAP", "HOT", "RUN", "MEH", "FUND", "IDX"]),
+    ("flagged",      ["CHEAP", "HOT", "RUN", "FUND"]),
+    ("buy",          ["CHEAP", "FUND"]),
+    ("sell",         ["HOT", "RUN"]),
+    ("hold",         ["MEH", "IDX"]),
+    ("overbought",   ["HOT"]),
+    ("overextended", ["RUN"]),
+    ("undervalued",  ["CHEAP", "FUND"]),
 ])
 def test_signal_filter(fake_fetch, signal, expected):
     tickers, screened = _screen(signal)
     assert tickers == expected
-    assert screened == 5        # NOPE was skipped, not screened
+    assert screened == 6        # NOPE was skipped, not screened
 
 
 @pytest.mark.parametrize("asset_type, expected", [
-    ("stock", ["CHEAP", "HOT", "MEH"]),
+    ("stock", ["CHEAP", "HOT", "RUN", "MEH"]),
     ("etf",   ["FUND"]),
 ])
 def test_asset_type_filter(fake_fetch, asset_type, expected):
     assert _screen("all", asset_type)[0] == expected
+
+
+# ── Every headline signal has display text in every output ────────────────────
+def test_overextended_has_display_everywhere(tmp_path, capsys):
+    stock = {**_row("RUN", pct_vs_200=25.0), "name": "Run Inc", "price": 100.0,
+             "change1d": 1.0, "wk_high": 110.0, "wk_low": 70.0, "pct_short": None,
+             "div_yield": None, "target_price": None, "target_upside": None,
+             "target_low": None, "target_high": None, "num_analysts": None,
+             "rating": None, "ext_session": None, "ext_price": None, "ext_change": None}
+    stock["signal"], stock["tags"], stock["thesis"] = ss.classify_signal(stock, None)
+    assert stock["signal"] == "overextended"
+
+    ss.print_report([stock], 1)
+    assert "Signal : OVEREXTENDED" in capsys.readouterr().out
+
+    out = tmp_path / "r.html"
+    ss.save_html_report([stock], 1, str(out))
+    assert ">Overextended</span>" in out.read_text(encoding="utf-8")

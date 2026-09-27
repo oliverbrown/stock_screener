@@ -52,6 +52,10 @@ one-line pointer to a timestamped log copy of the whole run in `./logs/`.
 | `mixed` | has both a buy-side and a sell-side tag |
 | `neutral` | none of the above |
 
+When a stock is both overbought and overextended (but not overvalued), the
+headline reads `overbought`; both tags still apply, so `--signal
+overextended` still finds it.
+
 A **value-trap guard** suppresses `undervalued` (and notes why) when the
 stock also has high debt/equity (>200%) or a negative profit margin — cheap
 for a reason, not a bargain.
@@ -136,7 +140,7 @@ Precedence when more than one is given: `--tickers` > `--tickers-file` >
 --signal sell           # overvalued / overbought / overextended / sell
 --signal hold            # no signal either way
 --signal all             # everything, unfiltered
---signal undervalued|oversold|overvalued|overbought   # one specific tag
+--signal undervalued|oversold|overvalued|overbought|overextended   # one specific tag
 
 --asset-type all|stock|etf   # restrict a mixed ticker list
 --max-pe 20                  # only names with P/E under 20 (holdings P/E for funds)
