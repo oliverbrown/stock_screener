@@ -454,10 +454,30 @@ def fetch_stock(ticker: str) -> dict | None:
         fyield   = info.get("yield")               # fraction, e.g. 0.0104
         beta     = info.get("beta3Year") or info.get("beta")
 
-        # ── Analyst price target (equities only; rarely populated for funds) ─
+        # ── Analyst 1-year consensus price target (equities only; rarely
+        #    populated for funds). Yahoo's "1y Target Est" is the mean. ───────
         target       = info.get("targetMeanPrice")
         target_upside = round((target / price - 1) * 100, 1) if target else None
+        target_low   = info.get("targetLowPrice")
+        target_high  = info.get("targetHighPrice")
         num_analysts = info.get("numberOfAnalystOpinions")
+        rating       = info.get("recommendationKey")       # e.g. "buy", "strong_buy"
+        if rating in (None, "none"):
+            rating = None
+
+        # ── Extended hours: only while the pre / post session is open ────────
+        market_state = (info.get("marketState") or "").upper()
+        ext_session, ext_price, ext_change = None, None, None
+        if market_state == "PRE":
+            ext_session = "pre"
+            ext_price   = info.get("preMarketPrice")
+            ext_change  = info.get("preMarketChangePercent")
+        elif market_state == "POST":
+            ext_session = "post"
+            ext_price   = info.get("postMarketPrice")
+            ext_change  = info.get("postMarketChangePercent")
+        if not ext_price:
+            ext_session, ext_change = None, None
 
         return {
             "ticker":       ticker,
@@ -490,7 +510,13 @@ def fetch_stock(ticker: str) -> dict | None:
             "beta":         round(float(beta), 2) if beta is not None else None,
             "target_price":  round(float(target), 2) if target else None,
             "target_upside": target_upside,
+            "target_low":    round(float(target_low), 2)  if target_low  else None,
+            "target_high":   round(float(target_high), 2) if target_high else None,
             "num_analysts":  int(num_analysts) if num_analysts else None,
+            "rating":        rating.replace("_", " ") if rating else None,
+            "ext_session":   ext_session,
+            "ext_price":     round(float(ext_price), 2) if ext_price else None,
+            "ext_change":    round(float(ext_change), 2) if ext_change is not None else None,
         }
     except Exception:
         return None
@@ -831,6 +857,12 @@ def print_report(stocks: list[dict], screened: int) -> None:
         lo_s    = f"{s['pct_off_low']:+.0f}%"  if s["pct_off_low"]  is not None else "N/A"
         short_s = f"{s['pct_short']:.1f}% of float" if s["pct_short"] is not None else "N/A"
         sig_s   = labels.get(s["signal"], s["signal"].upper())
+        ext_line = None
+        if s["ext_price"] is not None:
+            ext_s = f"${s['ext_price']:.2f}"
+            if s["ext_change"] is not None:
+                ext_s += f" ({s['ext_change']:+.2f}%)"
+            ext_line = f"{'Pre-mkt' if s['ext_session'] == 'pre' else 'Post-mkt'}: {ext_s}"
 
         if s["is_fund"]:
             nav_s  = f"{s['nav_premium']:+.2f}% vs NAV" if s["nav_premium"] is not None else "N/A"
@@ -840,6 +872,8 @@ def print_report(stocks: list[dict], screened: int) -> None:
             print(f"\n  {s['ticker']:6}  {s['name']}  [{s['quote_type']}]")
             print(f"  {'─' * (W - 2)}")
             print(f"  Price   : ${s['price']:<10.2f} Today : {chg_s}")
+            if ext_line:
+                print(f"  {ext_line}")
             print(f"  NAV     : {nav_s:<16} Yield : {yld_s}")
             print(f"  Hold P/E: {pe_s:<16} RSI   : {rsi_s}")
             print(f"  Trend   : {ma200_s:<16} 52wk  : {lo_s} from low / {hi_s} from high")
@@ -856,19 +890,25 @@ def print_report(stocks: list[dict], screened: int) -> None:
         dy_s    = f"{s['div_yield']:.2f}%"     if s["div_yield"]    is not None else "N/A"
         if s["target_price"] is not None:
             tgt_s = f"${s['target_price']:.2f} ({s['target_upside']:+.1f}%)"
-            if s["num_analysts"]:
-                tgt_s += f", {s['num_analysts']} analysts"
+            if s["target_low"] is not None and s["target_high"] is not None:
+                tgt_s += f"  range ${s['target_low']:.0f}–${s['target_high']:.0f}"
+            extra = [x for x in (f"{s['num_analysts']} analysts" if s["num_analysts"] else None,
+                                 s["rating"]) if x]
+            if extra:
+                tgt_s += f"  ({', '.join(extra)})"
         else:
             tgt_s = "N/A"
         print(f"\n  {s['ticker']:6}  {s['name']}")
         print(f"  {'─' * (W - 2)}")
         print(f"  Price  : ${s['price']:<10.2f}  Today : {chg_s}")
+        if ext_line:
+            print(f"  {ext_line}")
         print(f"  P/E    : {pe_s:<10}  P/B   : {pb_s}")
         print(f"  PEG    : {peg_s:<10}  RSI   : {rsi_s}")
         print(f"  Trend  : {ma200_s:<15}  52wk  : {lo_s} from low / {hi_s} from high")
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
         print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
-        print(f"  Target : {tgt_s}")
+        print(f"  1y Tgt : {tgt_s}")
         print(f"  Sector : {s['sector']}")
         print(f"  Signal : {sig_s}")
         print(f"  {s['thesis']}")
@@ -901,6 +941,13 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
         short_s = f"{s['pct_short']:.1f}%" if s["pct_short"] is not None else "N/A"
+        ext_html = ""
+        if s["ext_price"] is not None:
+            ext_lbl = "Pre-market" if s["ext_session"] == "pre" else "After hours"
+            ext_c   = "#16a34a" if (s["ext_change"] or 0) >= 0 else "#dc2626"
+            ext_pct = (f' <span style="color:{ext_c}">{s["ext_change"]:+.2f}%</span>'
+                       if s["ext_change"] is not None else "")
+            ext_html = (f'<span class="ext">{ext_lbl} ${s["ext_price"]:.2f}{ext_pct}</span>')
 
         if s["is_fund"]:
             nav_s  = f"{s['nav_premium']:+.2f}%" if s["nav_premium"] is not None else "N/A"
@@ -912,7 +959,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
           <div class="card-top">
             <div>
               <div class="sname">{s['ticker']} <span class="price">${s['price']:.2f}</span>
-                <span class="kind">{s['quote_type']}</span></div>
+                <span class="kind">{s['quote_type']}</span>{ext_html}</div>
               <div class="ssub">{s['name']} &middot; {s['category'] or 'fund'}</div>
             </div>
             <span class="badge" style="background:{bg};color:{fg}">{label}</span>
@@ -940,13 +987,22 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         dy_s    = f"{s['div_yield']:.2f}%"    if s["div_yield"]   is not None else "N/A"
         if s["target_price"] is not None:
             tgt_s = f"${s['target_price']:.2f} ({s['target_upside']:+.1f}%)"
+            sub = []
+            if s["target_low"] is not None and s["target_high"] is not None:
+                sub.append(f"${s['target_low']:.0f}–${s['target_high']:.0f}")
+            if s["num_analysts"]:
+                sub.append(f"{s['num_analysts']} analysts")
+            if s["rating"]:
+                sub.append(s["rating"])
+            if sub:
+                tgt_s += f'<div class="msub">{" &middot; ".join(sub)}</div>'
         else:
             tgt_s = "N/A"
         cards += f"""
         <div class="card">
           <div class="card-top">
             <div>
-              <div class="sname">{s['ticker']} <span class="price">${s['price']:.2f}</span></div>
+              <div class="sname">{s['ticker']} <span class="price">${s['price']:.2f}</span>{ext_html}</div>
               <div class="ssub">{s['name']} &middot; {s['sector']}</div>
             </div>
             <span class="badge" style="background:{bg};color:{fg}">{label}</span>
@@ -962,7 +1018,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Profit margin</div><div class="mv">{mgn_s}</div></div>
             <div><div class="ml">Dividend yield</div><div class="mv">{dy_s}</div></div>
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
-            <div><div class="ml">Analyst target</div><div class="mv">{tgt_s}</div></div>
+            <div><div class="ml">1y target (consensus)</div><div class="mv">{tgt_s}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -1004,6 +1060,8 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
            border-bottom:0.5px solid rgba(0,0,0,.1);margin-bottom:10px}}
 .ml{{font-size:10px;color:#9f9f9b;margin-bottom:3px}}
 .mv{{font-size:13px;font-weight:500}}
+.msub{{font-size:10px;font-weight:400;color:#9f9f9b;margin-top:2px}}
+.ext{{font-size:12px;font-weight:400;color:#6b6b67;margin-left:8px;white-space:nowrap}}
 .thesis{{font-size:12px;color:#6b6b67;line-height:1.65}}
 .disc{{font-size:11px;color:#9f9f9b;text-align:center;margin-top:1.5rem;line-height:1.6}}
 @media(max-width:500px){{.metrics{{grid-template-columns:repeat(2,1fr)}}}}
