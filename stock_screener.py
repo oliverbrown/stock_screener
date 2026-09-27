@@ -46,6 +46,7 @@ import io
 import re
 import time
 import random
+import urllib.parse
 import urllib.request
 import warnings
 from datetime import datetime
@@ -941,6 +942,11 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
         short_s = f"{s['pct_short']:.1f}%" if s["pct_short"] is not None else "N/A"
+        # Yahoo uses "-" for share classes (BRK.B -> BRK-B)
+        yahoo_url = ("https://finance.yahoo.com/quote/"
+                     + urllib.parse.quote(s["ticker"].replace(".", "-")))
+        tkr_html = (f'<a class="tkr" href="{yahoo_url}" target="_blank" '
+                    f'rel="noopener">{s["ticker"]}</a>')
         ext_html = ""
         if s["ext_price"] is not None:
             ext_lbl = "Pre-market" if s["ext_session"] == "pre" else "After hours"
@@ -958,7 +964,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         <div class="card">
           <div class="card-top">
             <div>
-              <div class="sname">{s['ticker']} <span class="price">${s['price']:.2f}</span>
+              <div class="sname">{tkr_html} <span class="price">${s['price']:.2f}</span>
                 <span class="kind">{s['quote_type']}</span>{ext_html}</div>
               <div class="ssub">{s['name']} &middot; {s['category'] or 'fund'}</div>
             </div>
@@ -1002,7 +1008,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         <div class="card">
           <div class="card-top">
             <div>
-              <div class="sname">{s['ticker']} <span class="price">${s['price']:.2f}</span>{ext_html}</div>
+              <div class="sname">{tkr_html} <span class="price">${s['price']:.2f}</span>{ext_html}</div>
               <div class="ssub">{s['name']} &middot; {s['sector']}</div>
             </div>
             <span class="badge" style="background:{bg};color:{fg}">{label}</span>
@@ -1050,6 +1056,8 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
             gap:8px;margin-bottom:10px}}
 .sname{{font-size:15px;font-weight:500}}
 .price{{font-weight:400}}
+.tkr{{color:inherit;text-decoration:none;border-bottom:1px dotted rgba(0,0,0,.35)}}
+.tkr:hover{{color:#2563eb;border-bottom-color:#2563eb}}
 .kind{{font-size:10px;font-weight:600;color:#6b6b67;border:0.5px solid rgba(0,0,0,.18);
         border-radius:4px;padding:1px 4px;margin-left:4px;vertical-align:middle}}
 .ssub{{font-size:12px;color:#6b6b67;margin-top:2px}}
