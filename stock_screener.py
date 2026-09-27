@@ -11,6 +11,8 @@ Stocks (equities):
     Context   — 50/200-day trend, distance from 52-week high/low, and a
                 value-trap guard (high debt / negative margins) that
                 suppresses a stale "undervalued" call
+    Info      — analysts' 1-year consensus price target (mean, with low–high
+                range, analyst count, and rating); not used in the signal
 
 ETFs / funds (auto-detected by quoteType):
     Buy side  — undervalued (discount to NAV, or holdings P/E below the
@@ -20,6 +22,10 @@ ETFs / funds (auto-detected by quoteType):
     hold      — no signal either way
     Context   — NAV premium/discount (always shown), distribution yield,
                 expense ratio (a high-cost fund is not a "bargain"), 3y beta
+
+All names — pre-market / after-hours price while that session is open.
+Tickers that can't be screened are skipped with a reason; Yahoo rate limits
+are retried with backoff. Share classes may be written BRK.B or BRK-B.
 
 Every run is also written to a timestamped log file in ./logs/.
 
@@ -43,6 +49,7 @@ import argparse
 import sys
 import os
 import io
+import logging
 import re
 import time
 import random
@@ -58,6 +65,12 @@ except ImportError:
     print("Missing dependencies. Run:  pip install yfinance pandas")
     sys.exit(1)
 
+try:
+    from yfinance.exceptions import YFRateLimitError
+except ImportError:                                   # older yfinance
+    class YFRateLimitError(Exception):
+        pass
+
 # yfinance's own __init__ re-enables DeprecationWarning for its module
 # (warnings.filterwarnings('default', ..., module='^yfinance')), which is
 # added *after* any filter set before the import and so takes precedence.
@@ -69,6 +82,11 @@ warnings.filterwarnings(
     message="The default dtype for empty Series",
     category=DeprecationWarning,
 )
+
+# yfinance logs its own raw HTTP errors (e.g. a 404 JSON blob for an unknown
+# ticker) straight to stderr, breaking up the progress line. fetch_stock
+# reports a readable skip reason instead, so mute yfinance's logger.
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 # ── Output mode ───────────────────────────────────────────────────────────────
 # Emoji status icons render on macOS out of the box but need a color-emoji font
@@ -111,12 +129,20 @@ class _Tee:
             s.flush()
 
 
+def yahoo_symbol(sym: str) -> str:
+    """Normalise a share-class ticker to Yahoo's dash form: BRK.B -> BRK-B.
+    Only a single A/B/C class letter is rewritten, so exchange suffixes
+    such as SHOP.TO or VOD.L are left alone."""
+    return re.sub(r"^([A-Z]+)\.([ABC])$", r"\1-\2", sym.strip().upper())
+
+
 def parse_tickers(text: str) -> list[str]:
     """Split a blob of ticker symbols on any run of whitespace, newlines,
-    carriage returns, and/or commas. Upper-cased, de-duplicated, order kept."""
+    carriage returns, and/or commas. Upper-cased, share classes normalised
+    to Yahoo's form (BRK.B -> BRK-B), de-duplicated, order kept."""
     seen, out = set(), []
     for tok in re.split(r"[,\s]+", text.strip()):
-        sym = tok.strip().upper()
+        sym = yahoo_symbol(tok) if tok.strip() else ""
         if sym and sym not in seen:
             seen.add(sym)
             out.append(sym)
@@ -262,7 +288,7 @@ SP500_TICKERS = [
     "ALL","ALLE","AMAT","AMCR","AMD","AME","AMGN","AMP","AMT","AMZN","ANET",
     "ANF","ANSS","AON","AOS","APA","APD","APH","APTV","ARE","ATO","AVB","AVGO",
     "AVY","AWK","AXP","AYI","AZO","BA","BAC","BAX","BBWI","BBY","BDX","BEN",
-    "BF.B","BIO","BK","BKNG","BKR","BLK","BMY","BR","BRK.B","BRO","BSX","BWA",
+    "BF-B","BIO","BK","BKNG","BKR","BLK","BMY","BR","BRK-B","BRO","BSX","BWA",
     "BXP","C","CAG","CAH","CARR","CAT","CB","CBOE","CBRE","CCI","CCL","CDNS",
     "CDW","CE","CEG","CF","CFG","CHD","CHRW","CHTR","CI","CINF","CL","CLX",
     "CMA","CMCSA","CME","CMG","CMI","CMS","CNC","CNP","COF","COO","COP","COST",
@@ -401,126 +427,157 @@ def compute_rsi(prices: pd.Series, period: int = 14) -> float:
 
 
 # ── Fetch one ticker ──────────────────────────────────────────────────────────
-def fetch_stock(ticker: str) -> dict | None:
-    try:
-        t    = yf.Ticker(ticker)
-        info = t.info
-        price = info.get("currentPrice") or info.get("regularMarketPrice")
-        if not price:
-            return None
-        hist = t.history(period="1y", auto_adjust=True)
-        if hist.empty or len(hist) < 2:
-            return None
-        close    = hist["Close"]
-        price    = float(price)
-        rsi      = compute_rsi(close)
-        change1d = round((close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
+# Seconds to wait before each retry when Yahoo rate-limits us.
+RATE_LIMIT_BACKOFF = (10, 30, 60)
 
-        # ── Trend: 50 / 200-day moving averages ──────────────────────────────
-        ma50  = float(close.rolling(50).mean().iloc[-1])  if len(close) >= 50  else None
-        ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
-        pct_vs_200 = round((price / ma200 - 1) * 100, 1) if ma200 else None
-        trend = None
-        if ma50 is not None and ma200 is not None:
-            trend = "up" if ma50 >= ma200 else "down"
 
-        # ── 52-week range position ──────────────────────────────────────────
-        wk_high = info.get("fiftyTwoWeekHigh")
-        wk_low  = info.get("fiftyTwoWeekLow")
-        pct_off_high = round((price / wk_high - 1) * 100, 1) if wk_high else None
-        pct_off_low  = round((price / wk_low  - 1) * 100, 1) if wk_low  else None
+class SkipTicker(Exception):
+    """Raised when a ticker can't be screened; the message is the reason."""
 
-        quote_type = (info.get("quoteType") or "EQUITY").upper()
-        is_fund    = quote_type != "EQUITY"
 
-        if is_fund:
-            # Only the fund's blended holdings P/E; ignore garbage forward values
-            raw_pe = info.get("trailingPE")
-            pe = raw_pe if (raw_pe and 0 < raw_pe < 200) else None
-        else:
-            pe = info.get("trailingPE") or info.get("forwardPE")
-        pb     = info.get("priceToBook")
-        peg    = info.get("trailingPegRatio") or info.get("pegRatio")
-        dte    = info.get("debtToEquity")          # already expressed as a percentage
-        margin = info.get("profitMargins")         # fraction, e.g. -0.05
+def _is_rate_limit(e: Exception) -> bool:
+    msg = str(e).lower()
+    return isinstance(e, YFRateLimitError) or "too many requests" in msg or " 429" in msg
 
-        # ── Dividend yield & short interest (stocks; sparsely populated for funds) ──
-        div_yield = info.get("dividendYield")          # already a percentage, e.g. 2.42
-        pct_short = info.get("shortPercentOfFloat")    # fraction, e.g. 0.0096
 
-        # ── Fund-only fields ────────────────────────────────────────────────
-        nav      = info.get("navPrice")
-        nav_prem = round((price / nav - 1) * 100, 2) if nav else None
-        expense  = info.get("netExpenseRatio")     # percent, e.g. 0.03 = 0.03%
-        fyield   = info.get("yield")               # fraction, e.g. 0.0104
-        beta     = info.get("beta3Year") or info.get("beta")
+def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
+    """Fetch and derive everything the screener needs for one ticker.
+    Returns (data, None), or (None, reason) when the ticker is skipped.
+    Retries with backoff when Yahoo rate-limits the request."""
+    for wait in (*RATE_LIMIT_BACKOFF, None):
+        try:
+            return _fetch_stock_once(ticker), None
+        except SkipTicker as e:
+            return None, str(e)
+        except Exception as e:
+            if not _is_rate_limit(e):
+                msg = " ".join(str(e).split())
+                msg = msg[:77] + "…" if len(msg) > 80 else msg
+                return None, f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+            if wait is None:
+                return None, f"rate-limited by Yahoo (gave up after {len(RATE_LIMIT_BACKOFF)} retries)"
+            print(f"rate-limited, retrying in {wait}s… ", end="", flush=True)
+            time.sleep(wait)
+    return None, "unreachable"
 
-        # ── Analyst 1-year consensus price target (equities only; rarely
-        #    populated for funds). Yahoo's "1y Target Est" is the mean. ───────
-        target       = info.get("targetMeanPrice")
-        target_upside = round((target / price - 1) * 100, 1) if target else None
-        target_low   = info.get("targetLowPrice")
-        target_high  = info.get("targetHighPrice")
-        num_analysts = info.get("numberOfAnalystOpinions")
-        rating       = info.get("recommendationKey")       # e.g. "buy", "strong_buy"
-        if rating in (None, "none"):
-            rating = None
 
-        # ── Extended hours: only while the pre / post session is open ────────
-        market_state = (info.get("marketState") or "").upper()
-        ext_session, ext_price, ext_change = None, None, None
-        if market_state == "PRE":
-            ext_session = "pre"
-            ext_price   = info.get("preMarketPrice")
-            ext_change  = info.get("preMarketChangePercent")
-        elif market_state == "POST":
-            ext_session = "post"
-            ext_price   = info.get("postMarketPrice")
-            ext_change  = info.get("postMarketChangePercent")
-        if not ext_price:
-            ext_session, ext_change = None, None
+def _fetch_stock_once(ticker: str) -> dict:
+    t    = yf.Ticker(ticker)
+    info = t.info
+    price = info.get("currentPrice") or info.get("regularMarketPrice")
+    if not price:
+        raise SkipTicker("no price data (unknown, delisted, or mistyped ticker?)")
+    hist = t.history(period="1y", auto_adjust=True)
+    if hist.empty or len(hist) < 2:
+        raise SkipTicker("not enough price history")
+    close    = hist["Close"]
+    price    = float(price)
+    rsi      = compute_rsi(close)
+    change1d = round((close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
 
-        return {
-            "ticker":       ticker,
-            "name":         info.get("longName") or info.get("shortName", ticker),
-            "sector":       info.get("sector", "Unknown"),
-            "quote_type":   quote_type,
-            "is_fund":      is_fund,
-            "category":     info.get("category"),
-            "price":        round(price, 2),
-            "change1d":     change1d,
-            "pe":           round(float(pe), 1)  if pe  else None,
-            "pb":           round(float(pb), 2)  if pb  else None,
-            "peg":          round(float(peg), 2) if peg else None,
-            "rsi":          rsi,
-            "ma50":         round(ma50, 2)  if ma50  is not None else None,
-            "ma200":        round(ma200, 2) if ma200 is not None else None,
-            "pct_vs_200":   pct_vs_200,
-            "trend":        trend,
-            "wk_high":      round(float(wk_high), 2) if wk_high else None,
-            "wk_low":       round(float(wk_low), 2)  if wk_low  else None,
-            "pct_off_high": pct_off_high,
-            "pct_off_low":  pct_off_low,
-            "debt_equity":  round(float(dte), 0)        if dte    is not None else None,
-            "margin":       round(float(margin) * 100, 1) if margin is not None else None,
-            "div_yield":    round(float(div_yield), 2) if div_yield is not None else None,
-            "pct_short":    round(float(pct_short) * 100, 2) if pct_short is not None else None,
-            "nav_premium":  nav_prem,
-            "expense":      round(float(expense), 2) if expense is not None else None,
-            "fund_yield":   round(float(fyield) * 100, 2) if fyield is not None else None,
-            "beta":         round(float(beta), 2) if beta is not None else None,
-            "target_price":  round(float(target), 2) if target else None,
-            "target_upside": target_upside,
-            "target_low":    round(float(target_low), 2)  if target_low  else None,
-            "target_high":   round(float(target_high), 2) if target_high else None,
-            "num_analysts":  int(num_analysts) if num_analysts else None,
-            "rating":        rating.replace("_", " ") if rating else None,
-            "ext_session":   ext_session,
-            "ext_price":     round(float(ext_price), 2) if ext_price else None,
-            "ext_change":    round(float(ext_change), 2) if ext_change is not None else None,
-        }
-    except Exception:
-        return None
+    # ── Trend: 50 / 200-day moving averages ──────────────────────────────
+    ma50  = float(close.rolling(50).mean().iloc[-1])  if len(close) >= 50  else None
+    ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
+    pct_vs_200 = round((price / ma200 - 1) * 100, 1) if ma200 else None
+    trend = None
+    if ma50 is not None and ma200 is not None:
+        trend = "up" if ma50 >= ma200 else "down"
+
+    # ── 52-week range position ──────────────────────────────────────────
+    wk_high = info.get("fiftyTwoWeekHigh")
+    wk_low  = info.get("fiftyTwoWeekLow")
+    pct_off_high = round((price / wk_high - 1) * 100, 1) if wk_high else None
+    pct_off_low  = round((price / wk_low  - 1) * 100, 1) if wk_low  else None
+
+    quote_type = (info.get("quoteType") or "EQUITY").upper()
+    is_fund    = quote_type != "EQUITY"
+
+    if is_fund:
+        # Only the fund's blended holdings P/E; ignore garbage forward values
+        raw_pe = info.get("trailingPE")
+        pe = raw_pe if (raw_pe and 0 < raw_pe < 200) else None
+    else:
+        pe = info.get("trailingPE") or info.get("forwardPE")
+    pb     = info.get("priceToBook")
+    peg    = info.get("trailingPegRatio") or info.get("pegRatio")
+    dte    = info.get("debtToEquity")          # already expressed as a percentage
+    margin = info.get("profitMargins")         # fraction, e.g. -0.05
+
+    # ── Dividend yield & short interest (stocks; sparsely populated for funds) ──
+    div_yield = info.get("dividendYield")          # already a percentage, e.g. 2.42
+    pct_short = info.get("shortPercentOfFloat")    # fraction, e.g. 0.0096
+
+    # ── Fund-only fields ────────────────────────────────────────────────
+    nav      = info.get("navPrice")
+    nav_prem = round((price / nav - 1) * 100, 2) if nav else None
+    expense  = info.get("netExpenseRatio")     # percent, e.g. 0.03 = 0.03%
+    fyield   = info.get("yield")               # fraction, e.g. 0.0104
+    beta     = info.get("beta3Year") or info.get("beta")
+
+    # ── Analyst 1-year consensus price target (equities only; rarely
+    #    populated for funds). Yahoo's "1y Target Est" is the mean. ───────
+    target       = info.get("targetMeanPrice")
+    target_upside = round((target / price - 1) * 100, 1) if target else None
+    target_low   = info.get("targetLowPrice")
+    target_high  = info.get("targetHighPrice")
+    num_analysts = info.get("numberOfAnalystOpinions")
+    rating       = info.get("recommendationKey")       # e.g. "buy", "strong_buy"
+    if rating in (None, "none"):
+        rating = None
+
+    # ── Extended hours: only while the pre / post session is open ────────
+    market_state = (info.get("marketState") or "").upper()
+    ext_session, ext_price, ext_change = None, None, None
+    if market_state == "PRE":
+        ext_session = "pre"
+        ext_price   = info.get("preMarketPrice")
+        ext_change  = info.get("preMarketChangePercent")
+    elif market_state == "POST":
+        ext_session = "post"
+        ext_price   = info.get("postMarketPrice")
+        ext_change  = info.get("postMarketChangePercent")
+    if not ext_price:
+        ext_session, ext_change = None, None
+
+    return {
+        "ticker":       ticker,
+        "name":         info.get("longName") or info.get("shortName", ticker),
+        "sector":       info.get("sector", "Unknown"),
+        "quote_type":   quote_type,
+        "is_fund":      is_fund,
+        "category":     info.get("category"),
+        "price":        round(price, 2),
+        "change1d":     change1d,
+        "pe":           round(float(pe), 1)  if pe  else None,
+        "pb":           round(float(pb), 2)  if pb  else None,
+        "peg":          round(float(peg), 2) if peg else None,
+        "rsi":          rsi,
+        "ma50":         round(ma50, 2)  if ma50  is not None else None,
+        "ma200":        round(ma200, 2) if ma200 is not None else None,
+        "pct_vs_200":   pct_vs_200,
+        "trend":        trend,
+        "wk_high":      round(float(wk_high), 2) if wk_high else None,
+        "wk_low":       round(float(wk_low), 2)  if wk_low  else None,
+        "pct_off_high": pct_off_high,
+        "pct_off_low":  pct_off_low,
+        "debt_equity":  round(float(dte), 0)        if dte    is not None else None,
+        "margin":       round(float(margin) * 100, 1) if margin is not None else None,
+        "div_yield":    round(float(div_yield), 2) if div_yield is not None else None,
+        "pct_short":    round(float(pct_short) * 100, 2) if pct_short is not None else None,
+        "nav_premium":  nav_prem,
+        "expense":      round(float(expense), 2) if expense is not None else None,
+        "fund_yield":   round(float(fyield) * 100, 2) if fyield is not None else None,
+        "beta":         round(float(beta), 2) if beta is not None else None,
+        "target_price":  round(float(target), 2) if target else None,
+        "target_upside": target_upside,
+        "target_low":    round(float(target_low), 2)  if target_low  else None,
+        "target_high":   round(float(target_high), 2) if target_high else None,
+        "num_analysts":  int(num_analysts) if num_analysts else None,
+        "rating":        rating.replace("_", " ") if rating else None,
+        "ext_session":   ext_session,
+        "ext_price":     round(float(ext_price), 2) if ext_price else None,
+        "ext_change":    round(float(ext_change), 2) if ext_change is not None else None,
+    }
 
 
 # ── Signal classifier ─────────────────────────────────────────────────────────
@@ -762,6 +819,7 @@ def run_screen(
     Returns (matched_stocks, total_analyzed).
     """
     results = []
+    skipped = []                                     # (ticker, reason)
     total   = len(tickers)
     icons   = {
         "buy": "[BUY] ", "undervalued": "[UV]  ", "oversold": "[OS]  ",
@@ -777,10 +835,11 @@ def run_screen(
         if verbose:
             print(f"  [{i:>4}/{total}] {ticker:<8}", end="", flush=True)
 
-        stock = fetch_stock(ticker)
+        stock, reason = fetch_stock(ticker)
         if stock is None:
+            skipped.append((ticker, reason))
             if verbose:
-                print("skipped")
+                print(f"skipped: {reason}")
             continue
 
         if (asset_type == "stock" and stock["is_fund"]) or \
@@ -808,6 +867,11 @@ def run_screen(
             if verbose:
                 print(f"\n  Pausing {delay}s to respect rate limits…\n")
             time.sleep(delay)
+
+    if verbose and skipped:
+        print(f"\n  Skipped {len(skipped)} of {total} ticker(s):")
+        for tkr, why in skipped:
+            print(f"    {tkr:<8} {why}")
 
     # Apply signal filter
     def _passes(stock: dict) -> bool:
@@ -942,9 +1006,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
         short_s = f"{s['pct_short']:.1f}%" if s["pct_short"] is not None else "N/A"
-        # Yahoo uses "-" for share classes (BRK.B -> BRK-B)
-        yahoo_url = ("https://finance.yahoo.com/quote/"
-                     + urllib.parse.quote(s["ticker"].replace(".", "-")))
+        yahoo_url = "https://finance.yahoo.com/quote/" + urllib.parse.quote(s["ticker"])
         tkr_html = (f'<a class="tkr" href="{yahoo_url}" target="_blank" '
                     f'rel="noopener">{s["ticker"]}</a>')
         ext_html = ""
