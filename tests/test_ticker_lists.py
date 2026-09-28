@@ -135,3 +135,45 @@ def test_every_live_index_has_a_fetcher():
     for key, meta in ss.INDICES.items():
         if meta.get("live"):
             assert key in ts.INDEX_FETCHERS
+
+
+# ── NASDAQ Trader symbol directory mirrors ────────────────────────────────────
+SYMDIR = (b"Symbol|Security Name|Market Category|Test Issue|Financial Status|Round Lot Size|ETF|NextShares\r\n"
+          b"AAPL|Apple Inc. - Common Stock|Q|N|N|100|N|N\r\n"
+          b"File Creation Time: 0928202608:31|||||||\r\n")
+BLOCK_PAGE = b'<html style="height:100%"><head>...Request unsuccessful. Incapsula incident ID: 1</html>'
+
+
+class _Resp:
+    def __init__(self, data):
+        self.data = data
+    def read(self):
+        return self.data
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+def test_symdir_uses_ftp_first(monkeypatch):
+    monkeypatch.setattr(ts.urllib.request, "urlopen", lambda url, timeout: _Resp(SYMDIR))
+    monkeypatch.setattr(ts, "fetch_url", lambda url: pytest.fail("HTTPS should not be needed"))
+    df = ts._read_symdir("nasdaqlisted.txt")
+    assert df["Symbol"].tolist() == ["AAPL"]
+
+
+def test_symdir_falls_back_to_https(monkeypatch):
+    def ftp_down(url, timeout):
+        raise OSError("ftp unreachable")
+    monkeypatch.setattr(ts.urllib.request, "urlopen", ftp_down)
+    monkeypatch.setattr(ts, "fetch_url", lambda url: SYMDIR)
+    assert ts._read_symdir("nasdaqlisted.txt")["Symbol"].tolist() == ["AAPL"]
+
+
+def test_symdir_block_page_is_a_clear_error(monkeypatch):
+    def ftp_down(url, timeout):
+        raise OSError("ftp unreachable")
+    monkeypatch.setattr(ts.urllib.request, "urlopen", ftp_down)
+    monkeypatch.setattr(ts, "fetch_url", lambda url: BLOCK_PAGE)
+    with pytest.raises(RuntimeError, match="bot protection"):
+        ts._read_symdir("nasdaqlisted.txt")

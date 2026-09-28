@@ -8,7 +8,8 @@ index members.
 
 Sources (all free, no API key):
     Exchanges       NASDAQ Trader symbol directory (nasdaqlisted.txt /
-                    otherlisted.txt) — every US exchange-listed security
+                    otherlisted.txt, via FTP or HTTPS) — every US
+                    exchange-listed security
     S&P 500/400/600 Wikipedia constituent tables
     Nasdaq-100      Nasdaq's own index list (api.nasdaq.com)
     Dow 30          Daily holdings of the SPDR Dow Jones ETF (DIA)
@@ -71,8 +72,13 @@ def _clean_name(name: str) -> str:
 
 
 # ── Exchanges ─────────────────────────────────────────────────────────────────
-NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
-OTHER_LISTED_URL  = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+# The same files are published on NASDAQ Trader's FTP server and website.
+# FTP is tried first: the website sits behind bot protection (Incapsula)
+# that intermittently answers scripts with an HTML block page instead.
+SYMDIR_MIRRORS = (
+    "ftp://ftp.nasdaqtrader.com/SymbolDirectory/",
+    "https://www.nasdaqtrader.com/dynamic/SymDir/",
+)
 
 # otherlisted.txt "Exchange" codes
 EXCHANGE_CODES = {"N": "nyse", "A": "nyse-american", "P": "nyse-arca", "Z": "cboe"}
@@ -95,10 +101,25 @@ def is_non_common(name: str) -> bool:
     return bool(_NON_COMMON.search(name)) and not _COMMON.search(name)
 
 
-def _read_symdir(url: str) -> pd.DataFrame:
-    df = pd.read_csv(io.BytesIO(fetch_url(url)), sep="|", dtype=str, keep_default_na=False)
-    first = df.columns[0]
-    return df[~df[first].str.startswith("File Creation Time")]
+def _read_symdir(filename: str) -> pd.DataFrame:
+    """Download a NASDAQ Trader symbol-directory file, trying each mirror."""
+    errors = []
+    for base in SYMDIR_MIRRORS:
+        try:
+            if base.startswith("ftp:"):
+                with urllib.request.urlopen(base + filename, timeout=60) as r:
+                    data = r.read()
+            else:
+                data = fetch_url(base + filename)
+            if b"|Security Name|" not in data.split(b"\n", 1)[0]:
+                raise ValueError("got an HTML page instead of the symbol file "
+                                 "(blocked by bot protection?)")
+        except Exception as e:
+            errors.append(f"{base}: {e}")
+            continue
+        df = pd.read_csv(io.BytesIO(data), sep="|", dtype=str, keep_default_na=False)
+        return df[~df[df.columns[0]].str.startswith("File Creation Time")]
+    raise RuntimeError(f"could not download {filename}: " + "; ".join(errors))
 
 
 def fetch_exchange_listings(all_securities: bool = False) -> list[dict]:
@@ -111,14 +132,14 @@ def fetch_exchange_listings(all_securities: bool = False) -> list[dict]:
     preferreds and notes too."""
     rows = []
 
-    nasdaq = _read_symdir(NASDAQ_LISTED_URL)
+    nasdaq = _read_symdir("nasdaqlisted.txt")
     for r in nasdaq.itertuples(index=False):
         rows.append({
             "raw": r.Symbol, "name": r[1], "exchange": "nasdaq",
             "etf": r.ETF == "Y", "test": r[3] == "Y",
         })
 
-    other = _read_symdir(OTHER_LISTED_URL)
+    other = _read_symdir("otherlisted.txt")
     for r in other.itertuples(index=False):
         rows.append({
             "raw": r[0], "name": r[1],
