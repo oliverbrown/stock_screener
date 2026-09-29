@@ -57,8 +57,16 @@ headline reads `overbought`; both tags still apply, so `--signal
 overextended` still finds it.
 
 A **value-trap guard** suppresses `undervalued` (and notes why) when the
-stock also has high debt/equity (>200%) or a negative profit margin — cheap
-for a reason, not a bargain.
+stock also has high debt/equity (>200%), a negative profit margin, or
+negative free cash flow — cheap for a reason, not a bargain. The same
+problems on a stock that isn't cheap are noted as a *quality watch*.
+
+**Free-cash-flow yield** (free cash flow ÷ market cap) is shown for every
+stock. Negative FCF isn't used in the value-trap check for financial stocks,
+whose cash flow mostly reflects their loan book or premiums, and it's
+ignored for foreign ADRs, which report cash flow in their local currency.
+Companies with a finance arm (e.g. Ford Credit) can show negative FCF even
+when the core business generates cash.
 
 **P/B sanity check:** Yahoo's price-to-book is ignored (shown as
 `N/A (bad data)`, with the reason in the HTML report) when it can't be

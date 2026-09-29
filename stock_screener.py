@@ -9,8 +9,8 @@ Stocks (equities):
     Sell side — overvalued (P/E vs sector, PEG > 2), overbought (RSI > 70),
                 overextended (>20% above the 200-day moving average)
     Context   — 50/200-day trend, distance from 52-week high/low, and a
-                value-trap guard (high debt / negative margins) that
-                suppresses a stale "undervalued" call
+                value-trap guard (high debt / negative margins / negative
+                free cash flow) that suppresses a stale "undervalued" call
     Money flow— 20-day Chaikin Money Flow (all names); for stocks, notes
                 whether accumulation/distribution supports the signal
     vs S&P 500— 3m / 6m / 1y total return vs SPY in points; buy signals
@@ -638,6 +638,20 @@ def sanitize_pb(info: dict) -> tuple[float | None, str | None]:
     return pb, None
 
 
+def fcf_yield(info: dict) -> tuple[float | None, str | None]:
+    """Free-cash-flow yield (%) = free cash flow / market cap, or
+    (None, reason) when it can't be trusted. Foreign ADRs report cash flow
+    in their local currency while market cap is in USD (TM came out at
+    -1,614%), so mismatched currencies are ignored, as for P/B."""
+    fcf, mcap = info.get("freeCashflow"), info.get("marketCap")
+    if fcf is None or not mcap:
+        return None, None
+    fin_ccy, ccy = info.get("financialCurrency"), info.get("currency")
+    if fin_ccy and ccy and fin_ccy != ccy:
+        return None, f"cash flow in {fin_ccy}, price in {ccy}"
+    return round(fcf / mcap * 100, 1), None
+
+
 # ── Fetch one ticker ──────────────────────────────────────────────────────────
 # Seconds to wait before each retry when Yahoo rate-limits us.
 RATE_LIMIT_BACKOFF = (10, 30, 60)
@@ -663,7 +677,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 5
+    VERSION = 6
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -785,6 +799,7 @@ def _fetch_stock_once(ticker: str) -> dict:
     else:
         pe = info.get("trailingPE") or info.get("forwardPE")
     pb, pb_note = sanitize_pb(info)
+    fcf_y, fcf_note = fcf_yield(info)
     peg    = info.get("trailingPegRatio") or info.get("pegRatio")
     dte    = info.get("debtToEquity")          # already expressed as a percentage
     margin = info.get("profitMargins")         # fraction, e.g. -0.05
@@ -839,6 +854,8 @@ def _fetch_stock_once(ticker: str) -> dict:
         "pe":           round(float(pe), 1)  if pe  else None,
         "pb":           round(float(pb), 2)  if pb  else None,
         "pb_note":      pb_note,
+        "fcf_yield":    fcf_y,
+        "fcf_note":     fcf_note,
         "peg":          round(float(peg), 2) if peg else None,
         "rsi":          rsi,
         "cmf":          cmf,
@@ -894,11 +911,17 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
     # ── Quality guards ──────────────────────────────────────────────────────
     high_debt    = dte    is not None and dte    > 200          # debt/equity > 200%
     unprofitable = margin is not None and margin < 0
+    # Burning cash. Not applied to financials: a lender's or insurer's cash
+    # flow mostly reflects its loan book and premiums, not business health.
+    fcf          = stock.get("fcf_yield")
+    cash_burn    = fcf is not None and fcf < 0 and sector != "Financial Services"
     quality_flags = []
     if high_debt:
         quality_flags.append(f"debt/equity {dte:.0f}%")
     if unprofitable:
         quality_flags.append(f"profit margin {margin:.1f}%")
+    if cash_burn:
+        quality_flags.append(f"negative free cash flow (FCF yield {fcf:.1f}%)")
 
     # ── Momentum ───────────────────────────────────────────────────────────
     is_oversold   = rsi_ok and rsi < 35
@@ -924,7 +947,7 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
 
     # A cheap stock with a broken balance sheet is a value trap, not a
     # bargain — suppress the undervalued call and flag it instead.
-    value_trap = is_undervalued and (high_debt or unprofitable)
+    value_trap = is_undervalued and (high_debt or unprofitable or cash_burn)
     if value_trap:
         is_undervalued = False
 
@@ -1333,7 +1356,10 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  P/E    : {pe_s:<10}  P/B   : {pb_s}")
         print(f"  PEG    : {peg_s:<10}  RSI   : {rsi_s}")
         print(f"  Trend  : {ma200_s:<15}  52wk  : {lo_s} from low / {hi_s} from high")
+        fcf_s   = (f"{s['fcf_yield']:+.1f}%" if s.get("fcf_yield") is not None else
+                   "N/A (bad data)" if s.get("fcf_note") else "N/A")
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
+        print(f"  FCF Yld: {fcf_s}")
         print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
         print(f"  MnyFlow: {cmf_s}")
         print(f"  vs S&P : {rel_s}")
@@ -1451,6 +1477,11 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"  if s["debt_equity"] is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"       if s["margin"]      is not None else "N/A"
+        fcf     = s.get("fcf_yield")
+        if fcf is not None:
+            fcf_s = f'<span style="color:{"#dc2626" if fcf < 0 else "inherit"}">{fcf:+.1f}%</span>'
+        else:
+            fcf_s = "N/A" + (f'<div class="msub">ignored: {s["fcf_note"]}</div>' if s.get("fcf_note") else "")
         dy_s    = f"{s['div_yield']:.2f}%"    if s["div_yield"]   is not None else "N/A"
         if s["target_price"] is not None:
             tgt_s = f"${s['target_price']:.2f} ({s['target_upside']:+.1f}%)"
@@ -1483,6 +1514,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Off 52w high</div><div class="mv">{hi_s}</div></div>
             <div><div class="ml">Debt / equity</div><div class="mv">{dte_s}</div></div>
             <div><div class="ml">Profit margin</div><div class="mv">{mgn_s}</div></div>
+            <div><div class="ml">FCF yield</div><div class="mv">{fcf_s}</div></div>
             <div><div class="ml">Dividend yield</div><div class="mv">{dy_s}</div></div>
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">1y target (consensus)</div><div class="mv">{tgt_s}</div></div>
