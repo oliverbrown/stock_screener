@@ -60,6 +60,12 @@ A **value-trap guard** suppresses `undervalued` (and notes why) when the
 stock also has high debt/equity (>200%) or a negative profit margin — cheap
 for a reason, not a bargain.
 
+**P/B sanity check:** Yahoo's price-to-book is ignored (shown as
+`N/A (bad data)`, with the reason in the HTML report) when it can't be
+trusted: for foreign ADRs, whose book value is per local share in the local
+currency (e.g. TSM, TM), and when it's implausibly low (< 0.05), as with
+BRK-B, whose book value Yahoo reports per Class A share.
+
 Every stock row also shows: P/E, P/B, PEG, RSI, 50/200-day trend, distance
 from its 52-week high/low, debt/equity, profit margin, dividend yield, short
 interest (% of float), and the analysts' **1-year consensus price target**

@@ -566,6 +566,31 @@ def earnings_details(stock: dict, today: date | None = None) -> list[str]:
     return out
 
 
+# ── Data sanity checks ────────────────────────────────────────────────────────
+# Below this, a P/B is a data error rather than a bargain (price at 5% of book).
+MIN_PLAUSIBLE_PB = 0.05
+
+
+def sanitize_pb(info: dict) -> tuple[float | None, str | None]:
+    """Yahoo's priceToBook, or (None, reason) when it can't be trusted.
+
+    Yahoo divides the listing's price by book value per share as reported
+    by the company, which breaks when the two aren't per the same share:
+      - foreign ADRs: book value is per local share in the local currency
+        (TSM in TWD, TM in JPY), price is per ADR in USD;
+      - share classes: BRK-B's book value is per Class A share (1 A = 1,500 B),
+        giving P/B 0.001 instead of ~1.4."""
+    pb = info.get("priceToBook")
+    if pb is None:
+        return None, None
+    fin_ccy, ccy = info.get("financialCurrency"), info.get("currency")
+    if fin_ccy and ccy and fin_ccy != ccy:
+        return None, f"book value in {fin_ccy}, price in {ccy}"
+    if pb < MIN_PLAUSIBLE_PB:
+        return None, f"Yahoo reports {pb:.2g}x, not plausible"
+    return pb, None
+
+
 # ── Fetch one ticker ──────────────────────────────────────────────────────────
 # Seconds to wait before each retry when Yahoo rate-limits us.
 RATE_LIMIT_BACKOFF = (10, 30, 60)
@@ -591,7 +616,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -711,7 +736,7 @@ def _fetch_stock_once(ticker: str) -> dict:
         pe = raw_pe if (raw_pe and 0 < raw_pe < 200) else None
     else:
         pe = info.get("trailingPE") or info.get("forwardPE")
-    pb     = info.get("priceToBook")
+    pb, pb_note = sanitize_pb(info)
     peg    = info.get("trailingPegRatio") or info.get("pegRatio")
     dte    = info.get("debtToEquity")          # already expressed as a percentage
     margin = info.get("profitMargins")         # fraction, e.g. -0.05
@@ -765,6 +790,7 @@ def _fetch_stock_once(ticker: str) -> dict:
         "change1d":     change1d,
         "pe":           round(float(pe), 1)  if pe  else None,
         "pb":           round(float(pb), 2)  if pb  else None,
+        "pb_note":      pb_note,
         "peg":          round(float(peg), 2) if peg else None,
         "rsi":          rsi,
         "cmf":          cmf,
@@ -1210,7 +1236,8 @@ def print_report(stocks: list[dict], screened: int) -> None:
             print(f"  {s['thesis']}")
             continue
 
-        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
+        pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else \
+                  "N/A (bad data)" if s.get("pb_note") else "N/A"
         peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"   if s["debt_equity"]  is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"        if s["margin"]       is not None else "N/A"
@@ -1335,6 +1362,8 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             continue
 
         pb_s    = f"{s['pb']}x"  if s["pb"]  is not None else "N/A"
+        if s.get("pb_note"):
+            pb_s += f'<div class="msub">ignored: {s["pb_note"]}</div>'
         peg_s   = f"{s['peg']}x" if s["peg"] is not None else "N/A"
         dte_s   = f"{s['debt_equity']:.0f}%"  if s["debt_equity"] is not None else "N/A"
         mgn_s   = f"{s['margin']:.1f}%"       if s["margin"]      is not None else "N/A"
