@@ -90,8 +90,17 @@ def test_rsi_mostly_rising_is_high():
 # ── fetch_stock: skip reasons and rate-limit retries ──────────────────────────
 @pytest.fixture
 def no_sleep(monkeypatch):
-    sleeps = []
-    monkeypatch.setattr(ss.time, "sleep", sleeps.append)
+    """Fake clock: sleep() records the delay and advances time() instead of
+    waiting, so the shared rate-limit cooldown resolves instantly."""
+    clock, sleeps = [1_000_000.0], []
+
+    def fake_sleep(seconds):
+        sleeps.append(round(seconds, 6))
+        clock[0] += seconds
+
+    monkeypatch.setattr(ss.time, "time", lambda: clock[0])
+    monkeypatch.setattr(ss.time, "sleep", fake_sleep)
+    monkeypatch.setattr(ss, "_cooldown_until", 0.0)
     return sleeps
 
 

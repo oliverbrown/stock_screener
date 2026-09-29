@@ -276,6 +276,22 @@ Logs older than 30 days are deleted automatically at the start of each run.
 Change that with `--keep-logs DAYS`, or keep everything with `--keep-logs 0`.
 Only `screener_*.log` files are ever removed.
 
+## Parallel downloads
+
+```bash
+python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --workers 8
+```
+
+`--workers N` downloads N tickers at a time (default 1). On 60 S&P 500
+tickers, 8 workers took 4.7 s instead of 26 s. Results and the report keep
+the original ticker order; progress lines appear as tickers finish. If Yahoo
+rate-limits any request, *all* workers pause together before retrying. Going
+much above 8 mostly just triggers those rate limits.
+
+When screening several overlapping lists, run the biggest list first with
+`--workers` (it fills the cache), then the rest — they'll mostly be served
+from the cache. Use a `--cache-minutes` long enough to cover the first run.
+
 ## Data cache
 
 Each ticker's downloaded data (~38 KB from Yahoo) is saved to `./cache/`

@@ -65,6 +65,8 @@ import logging
 import re
 import time
 import random
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
 import warnings
 from datetime import date, datetime, timezone
@@ -217,10 +219,14 @@ def _open_run_log(log_dir: str = "logs"):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path  = os.path.join(log_dir, f"screener_{stamp}.log")
     n = 1
-    while os.path.exists(path):                       # same-second reruns
-        path = os.path.join(log_dir, f"screener_{stamp}_{n}.log")
-        n += 1
-    return open(path, "w", encoding="utf-8", buffering=1), path
+    while True:
+        try:
+            # "x" = create only if new, so runs started in the same second
+            # (e.g. in parallel) can never end up sharing one log file
+            return open(path, "x", encoding="utf-8", buffering=1), path
+        except FileExistsError:
+            path = os.path.join(log_dir, f"screener_{stamp}_{n}.log")
+            n += 1
 
 
 def resolve_output_path(output: str | None, index_key: str | None) -> str | None:
@@ -684,6 +690,7 @@ class TickerCache:
         self.max_age = max_age_min * 60
         self.hits    = 0
         self.misses  = 0
+        self._lock   = threading.Lock()
         os.makedirs(cache_dir, exist_ok=True)
 
     def _path(self, ticker: str) -> str:
@@ -695,16 +702,19 @@ class TickerCache:
                 entry = json.load(f)
             age = time.time() - entry["fetched"]
             if entry.get("version") == self.VERSION and 0 <= age <= self.max_age:
-                self.hits += 1
+                with self._lock:
+                    self.hits += 1
                 return {**entry["data"], "cached_min": int(age // 60)}
         except (OSError, ValueError, KeyError, TypeError):
             pass
-        self.misses += 1
+        with self._lock:
+            self.misses += 1
         return None
 
     def put(self, ticker: str, data: dict) -> None:
         entry = {"version": self.VERSION, "fetched": time.time(), "data": data}
-        tmp = self._path(ticker) + ".tmp"
+        # Unique per process and thread, so parallel writers never share a temp file
+        tmp = f"{self._path(ticker)}.{os.getpid()}.{threading.get_ident()}.tmp"
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(entry, f)
@@ -730,6 +740,24 @@ class TickerCache:
 CACHE: TickerCache | None = None
 
 
+# When any thread is rate-limited, every thread waits until this time before
+# its next request, so parallel workers back off together.
+_cooldown_until = 0.0
+_cooldown_lock  = threading.Lock()
+
+
+def _wait_for_cooldown() -> None:
+    delay = _cooldown_until - time.time()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _start_cooldown(seconds: float) -> None:
+    global _cooldown_until
+    with _cooldown_lock:
+        _cooldown_until = max(_cooldown_until, time.time() + seconds)
+
+
 def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
     """Fetch and derive everything the screener needs for one ticker.
     Returns (data, None), or (None, reason) when the ticker is skipped.
@@ -740,6 +768,7 @@ def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
         if cached is not None:
             return cached, None
     for wait in (*RATE_LIMIT_BACKOFF, None):
+        _wait_for_cooldown()
         try:
             data = _fetch_stock_once(ticker)
             if CACHE is not None:
@@ -754,8 +783,9 @@ def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
                 return None, f"{type(e).__name__}: {msg}" if msg else type(e).__name__
             if wait is None:
                 return None, f"rate-limited by Yahoo (gave up after {len(RATE_LIMIT_BACKOFF)} retries)"
-            print(f"rate-limited, retrying in {wait}s… ", end="", flush=True)
-            time.sleep(wait)
+            # One write call, so lines from parallel threads don't interleave
+            sys.stdout.write(f"  ⚠ {ticker}: rate-limited by Yahoo, pausing {wait}s…\n")
+            _start_cooldown(wait)
     return None, "unreachable"
 
 
@@ -1169,10 +1199,13 @@ def run_screen(
     verbose:       bool        = True,
     batch_size:    int         = 20,
     delay:         float       = 1.0,
+    workers:       int         = 1,
 ) -> tuple[list[dict], int]:
     """
-    Screen tickers in batches to avoid rate-limiting from Yahoo Finance.
-    Returns (matched_stocks, total_analyzed).
+    Screen tickers, downloading with `workers` threads in parallel. With one
+    worker it pauses `delay` seconds every `batch_size` downloads; with more,
+    threads share a cooldown whenever Yahoo rate-limits a request.
+    Returns (matched_stocks, total_analyzed), in the order given.
     """
     bench = benchmark_returns()
     if verbose:
@@ -1182,8 +1215,6 @@ def run_screen(
         else:
             print(f"  Benchmark: S&P 500 ({BENCHMARK}) unavailable; no relative performance\n")
 
-    results = []
-    skipped = []                                     # (ticker, reason)
     fetched = 0                                      # real downloads (not cache hits)
     total   = len(tickers)
     icons   = {
@@ -1198,48 +1229,68 @@ def run_screen(
         "mixed": "❓", "neutral": "  ", "hold": "  ",
     }
 
-    for i, ticker in enumerate(tickers, 1):
-        if verbose:
-            print(f"  [{i:>4}/{total}] {ticker:<8}", end="", flush=True)
-
+    def screen_one(ticker: str):
+        """Fetch, filter and classify one ticker. Runs in worker threads, so
+        it only returns results; all printing happens in the main thread."""
         stock, reason = fetch_stock(ticker)
         from_cache = stock is not None and stock.get("cached_min") is not None
-        if not from_cache:
-            fetched += 1
         if stock is None:
-            skipped.append((ticker, reason))
-            if verbose:
-                print(f"skipped: {reason}")
-            continue
-
+            return ticker, None, from_cache, f"skipped: {reason}", reason
         if (asset_type == "stock" and stock["is_fund"]) or \
            (asset_type == "etf"   and stock["quote_type"] != "ETF"):
-            if verbose:
-                print(f"filtered ({stock['quote_type'].lower()})")
-            continue
-
+            return ticker, None, from_cache, f"filtered ({stock['quote_type'].lower()})", None
         stock["rel"] = relative_returns(stock.get("returns"), bench)
         classifier = classify_fund if stock["is_fund"] else classify_signal
-        signal, tags, thesis = classifier(stock, max_pe)
-        stock["signal"] = signal
-        stock["tags"]   = tags
-        stock["thesis"] = thesis
-        results.append(stock)
+        stock["signal"], stock["tags"], stock["thesis"] = classifier(stock, max_pe)
+        return ticker, stock, from_cache, None, None
 
-        if verbose:
-            icon = icons.get(signal, "  ")
-            kind = f"[{stock['quote_type'][:3]}] " if stock["is_fund"] else ""
-            pe_s = f"P/E {stock['pe']}x" if stock["pe"] else "P/E N/A"
-            rsi_s = f"RSI {stock['rsi']}" if stock["rsi"] else ""
-            cache_s = f"  (cached {stock['cached_min']}m ago)" if from_cache else ""
-            print(f"{icon} {kind}{signal:<12}  {pe_s}  {rsi_s}{cache_s}")
+    def report(n: int, ticker: str, stock, from_cache: bool, note) -> None:
+        if not verbose:
+            return
+        if note:
+            print(f"  [{n:>4}/{total}] {ticker:<8}{note}")
+            return
+        signal = stock["signal"]
+        icon = icons.get(signal, "  ")
+        kind = f"[{stock['quote_type'][:3]}] " if stock["is_fund"] else ""
+        pe_s = f"P/E {stock['pe']}x" if stock["pe"] else "P/E N/A"
+        rsi_s = f"RSI {stock['rsi']}" if stock["rsi"] else ""
+        cache_s = f"  (cached {stock['cached_min']}m ago)" if from_cache else ""
+        print(f"  [{n:>4}/{total}] {ticker:<8}{icon} {kind}{signal:<12}  {pe_s}  {rsi_s}{cache_s}")
 
-        # Polite delay every batch_size downloads to avoid rate limits
-        # (cache hits make no requests, so they don't count)
-        if not from_cache and fetched % batch_size == 0 and i < total:
-            if verbose:
-                print(f"\n  Pausing {delay}s to respect rate limits…\n")
-            time.sleep(delay)
+    by_ticker = {}                                   # ticker -> classified stock
+    fail_why  = {}                                   # ticker -> skip reason
+
+    def record(n, outcome):
+        nonlocal fetched
+        ticker, stock, from_cache, note, reason = outcome
+        if not from_cache:
+            fetched += 1
+        if stock is not None:
+            by_ticker[ticker] = stock
+        elif reason is not None:
+            fail_why[ticker] = reason
+        report(n, ticker, stock, from_cache, note)
+        return from_cache
+
+    if workers <= 1:
+        for i, ticker in enumerate(tickers, 1):
+            from_cache = record(i, screen_one(ticker))
+            # Polite delay every batch_size downloads to avoid rate limits
+            # (cache hits make no requests, so they don't count)
+            if not from_cache and fetched % batch_size == 0 and i < total:
+                if verbose:
+                    print(f"\n  Pausing {delay}s to respect rate limits…\n")
+                time.sleep(delay)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(screen_one, t) for t in tickers]
+            for n, fut in enumerate(as_completed(futures), 1):
+                record(n, fut.result())
+
+    # Results and skips in the order the tickers were given, not finish order
+    results = [by_ticker[t] for t in tickers if t in by_ticker]
+    skipped = [(t, fail_why[t]) for t in tickers if t in fail_why]
 
     if verbose and CACHE is not None:
         print(f"\n  Data: {total - fetched} ticker(s) from cache, {fetched} downloaded")
@@ -1666,6 +1717,9 @@ when STOCK_SCREENER_ASCII is set.
                              "again (default: 30)")
     parser.add_argument("--no-cache", action="store_true",
                         help="Always download fresh data (same as --cache-minutes 0)")
+    parser.add_argument("--workers", type=int, default=1, metavar="N",
+                        help="Download N tickers in parallel (default: 1). 4-8 speeds up "
+                             "big lists a lot; more mostly just triggers Yahoo rate limits")
     parser.add_argument("--cache-dir", type=str, default="cache", metavar="DIR",
                         help="Directory for the ticker data cache (default: ./cache)")
     parser.add_argument("--ascii", action="store_true",
@@ -1725,6 +1779,7 @@ when STOCK_SCREENER_ASCII is set.
         print(f"Signal  : {args.signal}")
         print(f"Assets  : {args.asset_type}")
         print(f"Max P/E : {args.max_pe or 'none'}")
+        print(f"Workers : {max(1, args.workers)}")
         print(f"Output  : {out_path or 'terminal only'}")
         print(f"Run log : {os.path.abspath(log_path)}")
         print(f"Cache   : " + (f"reuse data up to {cache_min:g} min old ({os.path.abspath(args.cache_dir)})"
@@ -1737,6 +1792,7 @@ when STOCK_SCREENER_ASCII is set.
             max_pe        = args.max_pe,
             asset_type    = args.asset_type,
             verbose       = True,
+            workers       = max(1, args.workers),
         )
 
         print_report(stocks, screened)
