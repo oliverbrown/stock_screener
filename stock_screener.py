@@ -13,6 +13,8 @@ Stocks (equities):
                 suppresses a stale "undervalued" call
     Money flow— 20-day Chaikin Money Flow (all names); for stocks, notes
                 whether accumulation/distribution supports the signal
+    Earnings  — next report date (before open / after close / estimated);
+                a report within 14 days is flagged, as is one in the last 5
     Info      — analysts' 1-year consensus price target (mean, with low–high
                 range, analyst count, and rating); not used in the signal
 
@@ -63,7 +65,13 @@ import time
 import random
 import urllib.parse
 import warnings
-from datetime import datetime
+from datetime import date, datetime, timezone
+
+try:
+    from zoneinfo import ZoneInfo
+    MARKET_TZ = ZoneInfo("America/New_York")
+except Exception:                                     # no tz database available
+    MARKET_TZ = timezone.utc
 
 try:
     import yfinance as yf
@@ -472,6 +480,92 @@ def cmf_label(cmf: float | None) -> str:
     return "neutral"
 
 
+# ── Earnings dates ────────────────────────────────────────────────────────────
+# A report within this many days gets a warning chip and a thesis note.
+EARNINGS_WARN_DAYS   = 14
+# A report this recent gets a "just reported" note in the thesis.
+EARNINGS_RECENT_DAYS = 5
+
+
+def market_today() -> date:
+    return datetime.now(MARKET_TZ).date()
+
+
+def parse_earnings(info: dict, today: date | None = None) -> tuple[dict | None, str | None]:
+    """Next and most recent earnings report from Yahoo's quote info.
+
+    Returns (next, last): next is {"date", "end", "time", "estimate"} with
+    ISO dates ("end" differs from "date" when Yahoo only has a window) and
+    time "before open" / "after close" / None; last is an ISO date. Either
+    may be None (funds, crypto, or no date announced)."""
+    today = today or market_today()
+
+    def et(ts):
+        try:
+            return datetime.fromtimestamp(float(ts), MARKET_TZ) if ts else None
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+
+    start, end = et(info.get("earningsTimestampStart")), et(info.get("earningsTimestampEnd"))
+    stamp = et(info.get("earningsTimestamp"))
+    upcoming = [d for d in (start, stamp) if d and d.date() >= today]
+    past     = [d for d in (stamp, start) if d and d.date() < today]
+
+    nxt = None
+    if upcoming:
+        when = upcoming[0]
+        estimate = bool(info.get("isEarningsDateEstimate"))
+        timing = None
+        if not estimate:
+            minutes = when.hour * 60 + when.minute
+            timing = ("before open" if minutes < 9 * 60 + 30 else
+                      "after close" if minutes >= 16 * 60 else None)
+        end_d = end.date() if (when is start and end and end.date() > when.date()) else when.date()
+        nxt = {"date": when.date().isoformat(), "end": end_d.isoformat(),
+               "time": timing, "estimate": estimate}
+    last = max(past).date().isoformat() if past else None
+    return nxt, last
+
+
+def earnings_days(stock: dict, today: date | None = None) -> int | None:
+    """Days until the next earnings report (0 = today), or None."""
+    nxt = stock.get("earnings_next")
+    if not nxt:
+        return None
+    return (date.fromisoformat(nxt["date"]) - (today or market_today())).days
+
+
+def days_since_earnings(stock: dict, today: date | None = None) -> int | None:
+    last = stock.get("earnings_last")
+    if not last:
+        return None
+    return ((today or market_today()) - date.fromisoformat(last)).days
+
+
+def _in_days(n: int) -> str:
+    return "today" if n == 0 else "tomorrow" if n == 1 else f"in {n} days"
+
+
+def earnings_when(stock: dict, year: bool = False) -> str:
+    """The next report's date, e.g. "Oct 29", "Thu Oct 29, 2026", or a
+    window "Oct 27–Nov 3" when Yahoo has no exact date."""
+    nxt = stock["earnings_next"]
+    d, e = date.fromisoformat(nxt["date"]), date.fromisoformat(nxt["end"])
+    when = f"{d:%a} {d:%b} {d.day}, {d.year}" if year else f"{d:%b} {d.day}"
+    return when + (f"–{e:%b} {e.day}" if e != d else "")
+
+
+def earnings_details(stock: dict, today: date | None = None) -> list[str]:
+    """e.g. ["in 31 days", "after close"] or ["in 40 days", "estimated"]."""
+    nxt = stock["earnings_next"]
+    out = [_in_days(earnings_days(stock, today))]
+    if nxt["time"]:
+        out.append(nxt["time"])
+    if nxt["estimate"]:
+        out.append("estimated")
+    return out
+
+
 # ── Fetch one ticker ──────────────────────────────────────────────────────────
 # Seconds to wait before each retry when Yahoo rate-limits us.
 RATE_LIMIT_BACKOFF = (10, 30, 60)
@@ -497,7 +591,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -644,6 +738,8 @@ def _fetch_stock_once(ticker: str) -> dict:
     if rating in (None, "none"):
         rating = None
 
+    earnings_next, earnings_last = parse_earnings(info)
+
     # ── Extended hours: only while the pre / post session is open ────────
     market_state = (info.get("marketState") or "").upper()
     ext_session, ext_price, ext_change = None, None, None
@@ -672,6 +768,8 @@ def _fetch_stock_once(ticker: str) -> dict:
         "peg":          round(float(peg), 2) if peg else None,
         "rsi":          rsi,
         "cmf":          cmf,
+        "earnings_next": earnings_next,
+        "earnings_last": earnings_last,
         "ma50":         round(ma50, 2)  if ma50  is not None else None,
         "ma200":        round(ma200, 2) if ma200 is not None else None,
         "pct_vs_200":   pct_vs_200,
@@ -811,6 +909,18 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
                        + ", ".join(quality_flags) + ").")
     elif quality_flags:
         reasons.append("Quality watch: " + ", ".join(quality_flags) + ".")
+
+    # Earnings: a report can reverse any signal overnight.
+    if signal != "neutral":
+        n = earnings_days(stock)
+        if n is not None and n <= EARNINGS_WARN_DAYS:
+            est = ", estimated" if stock["earnings_next"]["estimate"] else ""
+            reasons.append(f"Earnings {_in_days(n)} ({earnings_when(stock)}{est}): "
+                           "the report can quickly reverse this signal.")
+        ago = days_since_earnings(stock)
+        if ago is not None and ago <= EARNINGS_RECENT_DAYS:
+            reasons.append(f"Reported earnings {'today' if ago == 0 else 'yesterday' if ago == 1 else f'{ago} days ago'}; "
+                           "the price may still be adjusting.")
 
     # Money flow confirms or questions a one-sided call; it never changes it.
     cmf = stock.get("cmf")
@@ -1126,6 +1236,11 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
         print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
         print(f"  MnyFlow: {cmf_s}")
+        if s.get("earnings_next"):
+            n = earnings_days(s)
+            warn = "⚠ " if n <= EARNINGS_WARN_DAYS else ""
+            print(f"  Earning: {warn}{earnings_when(s, year=True)} "
+                  f"({', '.join(earnings_details(s))})")
         print(f"  1y Tgt : {tgt_s}")
         print(f"  Sector : {s['sector']}")
         print(f"  Signal : {sig_s}")
@@ -1178,6 +1293,14 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             ext_pct = (f' <span style="color:{ext_c}">{s["ext_change"]:+.2f}%</span>'
                        if s["ext_change"] is not None else "")
             ext_html = (f'<span class="ext">{ext_lbl} ${s["ext_price"]:.2f}{ext_pct}</span>')
+        earn_n    = earnings_days(s)
+        earn_soon = earn_n is not None and earn_n <= EARNINGS_WARN_DAYS
+        earn_chip = f'<span class="earn">📅 Earnings {_in_days(earn_n)}</span>' if earn_soon else ""
+        if s.get("earnings_next"):
+            earn_html = (f'<span class="{"warn" if earn_soon else ""}">{earnings_when(s)}</span>'
+                         f'<div class="msub">{" &middot; ".join(earnings_details(s))}</div>')
+        else:
+            earn_html = "N/A"
 
         if s["is_fund"]:
             nav_s  = f"{s['nav_premium']:+.2f}%" if s["nav_premium"] is not None else "N/A"
@@ -1233,7 +1356,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         <div class="card">
           <div class="card-top">
             <div>
-              <div class="sname">{tkr_html} <span class="price">${s['price']:.2f}</span>{ext_html}</div>
+              <div class="sname">{tkr_html} <span class="price">${s['price']:.2f}</span>{ext_html}{earn_chip}</div>
               <div class="ssub">{s['name']} &middot; {s['sector']}</div>
             </div>
             <span class="badge" style="background:{bg};color:{fg}">{label}</span>
@@ -1251,6 +1374,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">1y target (consensus)</div><div class="mv">{tgt_s}</div></div>
             <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
+            <div><div class="ml">Next earnings</div><div class="mv">{earn_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -1296,6 +1420,9 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
 .mv{{font-size:13px;font-weight:500}}
 .msub{{font-size:10px;font-weight:400;color:#9f9f9b;margin-top:2px}}
 .ext{{font-size:12px;font-weight:400;color:#6b6b67;margin-left:8px;white-space:nowrap}}
+.earn{{font-size:11px;font-weight:500;color:#b45309;background:#fffbeb;border-radius:4px;
+       padding:1px 6px;margin-left:8px;white-space:nowrap}}
+.warn{{color:#b45309}}
 .thesis{{font-size:12px;color:#6b6b67;line-height:1.65}}
 .disc{{font-size:11px;color:#9f9f9b;text-align:center;margin-top:1.5rem;line-height:1.6}}
 @media(max-width:500px){{.metrics{{grid-template-columns:repeat(2,1fr)}}}}

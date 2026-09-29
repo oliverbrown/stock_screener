@@ -68,6 +68,21 @@ current price, the low–high target range, the number of analysts, and their
 consensus rating (e.g. `buy`). These are shown for context only; they don't
 feed into the signal.
 
+### Earnings dates
+
+Every stock shows its **next earnings report**: the date, a countdown, and
+whether it's before the open or after the close (or "estimated" when the
+company hasn't confirmed it), e.g. `Oct 29 · in 31 days · after close`.
+
+A report within **14 days** gets a 📅 *Earnings in 4 days* chip next to the
+price, and — for any stock with a signal — a note in the explanation that
+the report can quickly reverse it. A report in the last 5 days gets a note
+that the price may still be adjusting. Like money flow, earnings dates never
+change a signal. Funds have no earnings dates.
+
+The countdown is worked out when the report is generated, so it stays
+correct for cached data.
+
 ### Money flow (Chaikin Money Flow)
 
 Every stock and fund also shows its 20-day **Chaikin Money Flow** (CMF),
