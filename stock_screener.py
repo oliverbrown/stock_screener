@@ -27,7 +27,10 @@ All names — pre-market / after-hours price while that session is open.
 Tickers that can't be screened are skipped with a reason; Yahoo rate limits
 are retried with backoff. Share classes may be written BRK.B or BRK-B.
 
-Every run is also written to a timestamped log file in ./logs/.
+Every run is also written to a timestamped log file in ./logs/ (logs older
+than 30 days are deleted automatically). Downloaded data is cached in
+./cache/ for 30 minutes, so back-to-back runs over overlapping ticker lists
+download each ticker only once.
 
 Usage:
     python3 stock_screener.py                          # default watchlist
@@ -48,6 +51,8 @@ Requirements:
 """
 
 import argparse
+import glob
+import json
 import sys
 import os
 import logging
@@ -174,6 +179,23 @@ def resolve_ascii(flag: bool) -> bool:
     if (os.environ.get("TERM") or "").lower() == "dumb":
         return True
     return "utf" not in (getattr(sys.stdout, "encoding", "") or "utf-8").lower()
+
+
+def prune_old_logs(log_dir: str, keep_days: int) -> int:
+    """Delete this screener's run logs (screener_*.log) older than keep_days.
+    keep_days <= 0 keeps everything. Returns how many were removed."""
+    if keep_days <= 0:
+        return 0
+    cutoff  = time.time() - keep_days * 86400
+    removed = 0
+    for path in glob.glob(os.path.join(log_dir, "screener_*.log")):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _open_run_log(log_dir: str = "logs"):
@@ -428,13 +450,85 @@ def _is_rate_limit(e: Exception) -> bool:
     return isinstance(e, YFRateLimitError) or "too many requests" in msg or " 429" in msg
 
 
+class TickerCache:
+    """On-disk cache of each ticker's fetched data, one JSON file per ticker.
+
+    Every stock_screener.py run is a separate process, so a runner script
+    that screens overlapping lists (my-stocks, then the S&P 500, then the
+    Nasdaq-100…) would otherwise download the same ticker again each time.
+    Entries are reused for max_age_min minutes; only successful fetches are
+    cached, never skips or errors."""
+
+    # Bump when fetch_stock's output fields change, so older entries (which
+    # would be missing the new fields) are ignored instead of crashing.
+    VERSION = 1
+
+    def __init__(self, cache_dir: str, max_age_min: float):
+        self.dir     = cache_dir
+        self.max_age = max_age_min * 60
+        self.hits    = 0
+        self.misses  = 0
+        os.makedirs(cache_dir, exist_ok=True)
+
+    def _path(self, ticker: str) -> str:
+        return os.path.join(self.dir, urllib.parse.quote(ticker, safe="") + ".json")
+
+    def get(self, ticker: str) -> dict | None:
+        try:
+            with open(self._path(ticker), encoding="utf-8") as f:
+                entry = json.load(f)
+            age = time.time() - entry["fetched"]
+            if entry.get("version") == self.VERSION and 0 <= age <= self.max_age:
+                self.hits += 1
+                return {**entry["data"], "cached_min": int(age // 60)}
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        self.misses += 1
+        return None
+
+    def put(self, ticker: str, data: dict) -> None:
+        entry = {"version": self.VERSION, "fetched": time.time(), "data": data}
+        tmp = self._path(ticker) + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(entry, f)
+            os.replace(tmp, self._path(ticker))        # atomic: no half-written files
+        except OSError:
+            pass
+
+    def prune(self, older_than_hours: float = 24) -> int:
+        """Delete entries older than older_than_hours. Returns how many."""
+        cutoff  = time.time() - older_than_hours * 3600
+        removed = 0
+        for path in glob.glob(os.path.join(self.dir, "*.json")):
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+        return removed
+
+
+# Set by main() unless --no-cache; None means always download.
+CACHE: TickerCache | None = None
+
+
 def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
     """Fetch and derive everything the screener needs for one ticker.
     Returns (data, None), or (None, reason) when the ticker is skipped.
-    Retries with backoff when Yahoo rate-limits the request."""
+    Uses CACHE when set (data then carries "cached_min", its age in
+    minutes). Retries with backoff when Yahoo rate-limits the request."""
+    if CACHE is not None:
+        cached = CACHE.get(ticker)
+        if cached is not None:
+            return cached, None
     for wait in (*RATE_LIMIT_BACKOFF, None):
         try:
-            return _fetch_stock_once(ticker), None
+            data = _fetch_stock_once(ticker)
+            if CACHE is not None:
+                CACHE.put(ticker, data)
+            return data, None
         except SkipTicker as e:
             return None, str(e)
         except Exception as e:
@@ -810,6 +904,7 @@ def run_screen(
     """
     results = []
     skipped = []                                     # (ticker, reason)
+    fetched = 0                                      # real downloads (not cache hits)
     total   = len(tickers)
     icons   = {
         "buy": "[BUY] ", "undervalued": "[UV]  ", "oversold": "[OS]  ",
@@ -828,6 +923,9 @@ def run_screen(
             print(f"  [{i:>4}/{total}] {ticker:<8}", end="", flush=True)
 
         stock, reason = fetch_stock(ticker)
+        from_cache = stock is not None and stock.get("cached_min") is not None
+        if not from_cache:
+            fetched += 1
         if stock is None:
             skipped.append((ticker, reason))
             if verbose:
@@ -852,13 +950,18 @@ def run_screen(
             kind = f"[{stock['quote_type'][:3]}] " if stock["is_fund"] else ""
             pe_s = f"P/E {stock['pe']}x" if stock["pe"] else "P/E N/A"
             rsi_s = f"RSI {stock['rsi']}" if stock["rsi"] else ""
-            print(f"{icon} {kind}{signal:<12}  {pe_s}  {rsi_s}")
+            cache_s = f"  (cached {stock['cached_min']}m ago)" if from_cache else ""
+            print(f"{icon} {kind}{signal:<12}  {pe_s}  {rsi_s}{cache_s}")
 
-        # Polite delay every batch_size tickers to avoid rate limits
-        if i % batch_size == 0 and i < total:
+        # Polite delay every batch_size downloads to avoid rate limits
+        # (cache hits make no requests, so they don't count)
+        if not from_cache and fetched % batch_size == 0 and i < total:
             if verbose:
                 print(f"\n  Pausing {delay}s to respect rate limits…\n")
             time.sleep(delay)
+
+    if verbose and CACHE is not None:
+        print(f"\n  Data: {total - fetched} ticker(s) from cache, {fetched} downloaded")
 
     if verbose and skipped:
         print(f"\n  Skipped {len(skipped)} of {total} ticker(s):")
@@ -1177,7 +1280,9 @@ Examples:
 
 ETFs / funds are auto-detected and screened on price-vs-NAV, holdings P/E vs
 category, and the usual RSI / trend signals. Every run is mirrored to a
-timestamped log in ./logs/ (override with --log-dir).
+timestamped log in ./logs/ (override with --log-dir; logs older than
+--keep-logs days are deleted). Each ticker's data is cached for
+--cache-minutes (default 30) in ./cache/; use --no-cache for fresh data.
 
 --ascii swaps the emoji status icons for [BUY]/[SELL]/… tags (handy on Linux
 without a color-emoji font); it auto-enables on a dumb / non-UTF-8 terminal or
@@ -1212,6 +1317,17 @@ when STOCK_SCREENER_ASCII is set.
                              "use a literal {index} in the name to place it yourself")
     parser.add_argument("--log-dir", type=str, default="logs", metavar="DIR",
                         help="Directory for timestamped run logs (default: ./logs)")
+    parser.add_argument("--keep-logs", type=int, default=30, metavar="DAYS",
+                        help="Delete run logs older than DAYS days at startup "
+                             "(default: 30; 0 keeps them all)")
+    parser.add_argument("--cache-minutes", type=float, default=30, metavar="N",
+                        help="Reuse each ticker's downloaded data for N minutes, so "
+                             "back-to-back runs over overlapping lists don't download it "
+                             "again (default: 30)")
+    parser.add_argument("--no-cache", action="store_true",
+                        help="Always download fresh data (same as --cache-minutes 0)")
+    parser.add_argument("--cache-dir", type=str, default="cache", metavar="DIR",
+                        help="Directory for the ticker data cache (default: ./cache)")
     parser.add_argument("--ascii", action="store_true",
                         help="Plain-ASCII output: replace emoji status icons with [BUY]/[SELL]/… "
                              "tags and box-drawing with -/=. Auto-enabled on a non-UTF-8 or "
@@ -1232,11 +1348,21 @@ when STOCK_SCREENER_ASCII is set.
     ASCII_OUTPUT = resolve_ascii(args.ascii)
 
     # ── Start run log: mirror everything to ./logs/screener_<timestamp>.log ──
+    old_logs = prune_old_logs(args.log_dir, args.keep_logs)
     log_file, log_path = _open_run_log(args.log_dir)
     sys.stdout = _Tee(sys.__stdout__, log_file, ascii_only=ASCII_OUTPUT)
     sys.stderr = _Tee(sys.__stderr__, log_file, ascii_only=ASCII_OUTPUT)
 
+    global CACHE
+    cache_min = 0 if args.no_cache else args.cache_minutes
+    if cache_min > 0:
+        CACHE = TickerCache(args.cache_dir, cache_min)
+        CACHE.prune()
+
     try:
+        if old_logs:
+            print(f"Removed {old_logs} run log(s) older than {args.keep_logs} days")
+
         # Resolve ticker list
         index_label = ""
         if args.tickers:
@@ -1261,6 +1387,8 @@ when STOCK_SCREENER_ASCII is set.
         print(f"Max P/E : {args.max_pe or 'none'}")
         print(f"Output  : {out_path or 'terminal only'}")
         print(f"Run log : {os.path.abspath(log_path)}")
+        print(f"Cache   : " + (f"reuse data up to {cache_min:g} min old ({os.path.abspath(args.cache_dir)})"
+                               if CACHE else "off"))
         print(f"\nFetching live data from Yahoo Finance…\n")
 
         stocks, screened = run_screen(

@@ -210,6 +210,30 @@ Every run is mirrored — console output, unmodified — to a uniquely named,
 timestamped file: `./logs/screener_<YYYYMMDD_HHMMSS>.log` (override the
 directory with `--log-dir`).
 
+Logs older than 30 days are deleted automatically at the start of each run.
+Change that with `--keep-logs DAYS`, or keep everything with `--keep-logs 0`.
+Only `screener_*.log` files are ever removed.
+
+## Data cache
+
+Each ticker's downloaded data (~38 KB from Yahoo) is saved to `./cache/`
+and reused for **30 minutes**, so a runner script that screens overlapping
+lists — your stocks, then the S&P 500, then the Nasdaq-100 — downloads each
+ticker only once. Cached tickers are marked `(cached 12m ago)` in the
+progress output, and each run ends with a `Data: N from cache, M downloaded`
+line.
+
+```bash
+--cache-minutes 60    # reuse data for up to an hour
+--no-cache            # always download fresh data
+--cache-dir DIR       # default: ./cache
+```
+
+Only successful fetches are cached (never skipped tickers or errors), and
+entries older than a day are cleaned up automatically. Cached prices can be
+up to `--cache-minutes` old, so use `--no-cache` when you need the latest
+price during market hours.
+
 ## Plain-ASCII output
 
 Emoji status icons render out of the box on macOS but need a color-emoji
