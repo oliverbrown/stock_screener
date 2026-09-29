@@ -13,6 +13,8 @@ Stocks (equities):
                 suppresses a stale "undervalued" call
     Money flow— 20-day Chaikin Money Flow (all names); for stocks, notes
                 whether accumulation/distribution supports the signal
+    vs S&P 500— 3m / 6m / 1y total return vs SPY in points; buy signals
+                note long-term laggards and pullbacks in leaders
     Earnings  — next report date (before open / after close / estimated);
                 a report within 14 days is flagged, as is one in the last 5
     Info      — analysts' 1-year consensus price target (mean, with low–high
@@ -480,6 +482,51 @@ def cmf_label(cmf: float | None) -> str:
     return "neutral"
 
 
+# ── Performance vs the S&P 500 ────────────────────────────────────────────────
+BENCHMARK       = "SPY"          # S&P 500 ETF; adjusted closes include dividends
+RETURN_PERIODS  = {"3m": 3, "6m": 6, "1y": 12}   # label -> months
+# Buy-side thesis notes: a 1-year laggard by this many points or more...
+LAGGARD_PTS     = -20
+# ...or a pullback in a leader (ahead over 1y, behind over 3m).
+LEADER_PTS      = 10
+PULLBACK_PTS    = -5
+
+
+def compute_returns(close: pd.Series) -> dict:
+    """Total return (%) over each RETURN_PERIODS window, from adjusted closes.
+    A window is None when the history doesn't reach back far enough (within
+    a week of the start date, to allow for weekends and holidays)."""
+    out = {}
+    if close.empty:
+        return {k: None for k in RETURN_PERIODS}
+    last_day, last = close.index[-1], float(close.iloc[-1])
+    for label, months in RETURN_PERIODS.items():
+        start = last_day - pd.DateOffset(months=months)
+        window = close[close.index >= start]
+        if window.empty or (window.index[0] - start).days > 7 or not window.iloc[0]:
+            out[label] = None
+        else:
+            out[label] = round((last / float(window.iloc[0]) - 1) * 100, 1)
+    return out
+
+
+def relative_returns(returns: dict | None, bench: dict | None) -> dict | None:
+    """Each window's return minus the benchmark's, in percentage points."""
+    if not returns or not bench:
+        return None
+    rel = {k: round(returns[k] - bench[k], 1)
+           if returns.get(k) is not None and bench.get(k) is not None else None
+           for k in RETURN_PERIODS}
+    return rel if any(v is not None for v in rel.values()) else None
+
+
+def benchmark_returns() -> dict | None:
+    """The S&P 500's returns for this run (fetched once, cached like any
+    ticker), or None if it can't be fetched."""
+    data, _ = fetch_stock(BENCHMARK)
+    return data.get("returns") if data else None
+
+
 # ── Earnings dates ────────────────────────────────────────────────────────────
 # A report within this many days gets a warning chip and a thesis note.
 EARNINGS_WARN_DAYS   = 14
@@ -616,7 +663,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 4
+    VERSION = 5
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -711,6 +758,7 @@ def _fetch_stock_once(ticker: str) -> dict:
     price    = float(price)
     rsi      = compute_rsi(close)
     cmf      = compute_cmf(hist)
+    returns  = compute_returns(close)
     change1d = round((close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
 
     # ── Trend: 50 / 200-day moving averages ──────────────────────────────
@@ -794,6 +842,7 @@ def _fetch_stock_once(ticker: str) -> dict:
         "peg":          round(float(peg), 2) if peg else None,
         "rsi":          rsi,
         "cmf":          cmf,
+        "returns":      returns,
         "earnings_next": earnings_next,
         "earnings_last": earnings_last,
         "ma50":         round(ma50, 2)  if ma50  is not None else None,
@@ -948,6 +997,17 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
             reasons.append(f"Reported earnings {'today' if ago == 0 else 'yesterday' if ago == 1 else f'{ago} days ago'}; "
                            "the price may still be adjusting.")
 
+    # Performance vs the S&P 500 tells a dip in a leader from a long decline.
+    rel = stock.get("rel") or {}
+    if buy and not sell and rel.get("1y") is not None:
+        if rel["1y"] <= LAGGARD_PTS:
+            reasons.append(f"Long-term laggard: {rel['1y']:+.0f} pts vs the S&P 500 over 1 year, "
+                           "so this may be a decline rather than a dip.")
+        elif (rel["1y"] >= LEADER_PTS and rel.get("3m") is not None
+              and rel["3m"] <= PULLBACK_PTS):
+            reasons.append(f"Pullback in a leader: {rel['1y']:+.0f} pts vs the S&P 500 over 1 year, "
+                           f"{rel['3m']:+.0f} over 3 months.")
+
     # Money flow confirms or questions a one-sided call; it never changes it.
     cmf = stock.get("cmf")
     if cmf is not None and buy != sell:
@@ -1091,6 +1151,14 @@ def run_screen(
     Screen tickers in batches to avoid rate-limiting from Yahoo Finance.
     Returns (matched_stocks, total_analyzed).
     """
+    bench = benchmark_returns()
+    if verbose:
+        if bench and bench.get("1y") is not None:
+            print(f"  Benchmark: S&P 500 ({BENCHMARK}) "
+                  + "  ".join(f"{k} {v:+.1f}%" for k, v in bench.items() if v is not None) + "\n")
+        else:
+            print(f"  Benchmark: S&P 500 ({BENCHMARK}) unavailable; no relative performance\n")
+
     results = []
     skipped = []                                     # (ticker, reason)
     fetched = 0                                      # real downloads (not cache hits)
@@ -1127,6 +1195,7 @@ def run_screen(
                 print(f"filtered ({stock['quote_type'].lower()})")
             continue
 
+        stock["rel"] = relative_returns(stock.get("returns"), bench)
         classifier = classify_fund if stock["is_fund"] else classify_signal
         signal, tags, thesis = classifier(stock, max_pe)
         stock["signal"] = signal
@@ -1209,6 +1278,9 @@ def print_report(stocks: list[dict], screened: int) -> None:
         sig_s   = labels.get(s["signal"], s["signal"].upper())
         cmf     = s.get("cmf")
         cmf_s   = f"{cmf:+.2f} ({cmf_label(cmf)})" if cmf is not None else "N/A"
+        rel     = s.get("rel")
+        rel_s   = ("  ".join(f"{k} {'N/A' if v is None else f'{v:+.1f}'}" for k, v in rel.items())
+                   + " pts" if rel else "N/A")
         ext_line = None
         if s["ext_price"] is not None:
             ext_s = f"${s['ext_price']:.2f}"
@@ -1232,6 +1304,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
             print(f"  Expense : {exp_s:<16} Beta  : {beta_s}")
             print(f"  Short   : {short_s:<16} Category: {s['category'] or '—'}")
             print(f"  MoneyFlw: {cmf_s}")
+            print(f"  vs S&P  : {rel_s}")
             print(f"  Signal  : {sig_s}")
             print(f"  {s['thesis']}")
             continue
@@ -1263,6 +1336,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
         print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
         print(f"  MnyFlow: {cmf_s}")
+        print(f"  vs S&P : {rel_s}")
         if s.get("earnings_next"):
             n = earnings_days(s)
             warn = "⚠ " if n <= EARNINGS_WARN_DAYS else ""
@@ -1310,6 +1384,15 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
                      "#dc2626" if cmf <= -CMF_THRESHOLD else "inherit")
             cmf_html = (f'<span style="color:{cmf_c}">{cmf:+.2f}</span>'
                         f'<div class="msub">{cmf_label(cmf)}</div>')
+        rel = s.get("rel")
+        if rel and rel.get("1y") is not None:
+            rel_c = "#16a34a" if rel["1y"] >= 0 else "#dc2626"
+            others = " &middot; ".join(f"{k} {v:+.0f}" for k, v in rel.items()
+                                       if k != "1y" and v is not None)
+            rel_html = (f'<span style="color:{rel_c}">{rel["1y"]:+.1f} pts</span>'
+                        f'<div class="msub">1y{" &middot; " + others if others else ""}</div>')
+        else:
+            rel_html = "N/A"
         yahoo_url = "https://finance.yahoo.com/quote/" + urllib.parse.quote(s["ticker"])
         tkr_html = (f'<a class="tkr" href="{yahoo_url}" target="_blank" '
                     f'rel="noopener">{s["ticker"]}</a>')
@@ -1355,6 +1438,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Beta (3y)</div><div class="mv">{beta_s}</div></div>
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
+            <div><div class="ml">vs S&amp;P 500</div><div class="mv">{rel_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -1403,6 +1487,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">1y target (consensus)</div><div class="mv">{tgt_s}</div></div>
             <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
+            <div><div class="ml">vs S&amp;P 500</div><div class="mv">{rel_html}</div></div>
             <div><div class="ml">Next earnings</div><div class="mv">{earn_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>

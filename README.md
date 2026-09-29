@@ -74,6 +74,24 @@ current price, the low–high target range, the number of analysts, and their
 consensus rating (e.g. `buy`). These are shown for context only; they don't
 feed into the signal.
 
+### Performance vs the S&P 500
+
+Every stock and fund shows how it has done against the S&P 500 over 3
+months, 6 months and 1 year, in percentage points: `+12.3 pts` means its
+total return beat the index by 12.3 points. The benchmark is SPY (fetched
+once per run and cached like any ticker); both sides use dividend-adjusted
+prices, so it compares total returns.
+
+For stocks with a buy signal, the explanation adds a note when this changes
+how the signal should be read:
+
+- **Long-term laggard**: 20+ points behind the S&P 500 over a year, so the
+  "dip" may be a longer decline.
+- **Pullback in a leader**: 10+ points ahead over a year but 5+ behind over
+  3 months.
+
+It never changes a signal.
+
 ### Earnings dates
 
 Every stock shows its **next earnings report**: the date, a countdown, and
