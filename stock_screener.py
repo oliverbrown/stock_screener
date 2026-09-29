@@ -11,6 +11,8 @@ Stocks (equities):
     Context   — 50/200-day trend, distance from 52-week high/low, and a
                 value-trap guard (high debt / negative margins) that
                 suppresses a stale "undervalued" call
+    Money flow— 20-day Chaikin Money Flow (all names); for stocks, notes
+                whether accumulation/distribution supports the signal
     Info      — analysts' 1-year consensus price target (mean, with low–high
                 range, analyst count, and rating); not used in the signal
 
@@ -436,6 +438,40 @@ def compute_rsi(prices: pd.Series, period: int = 14) -> float:
     return round(float(rsi.iloc[-1]), 1)
 
 
+# ── Chaikin Money Flow ────────────────────────────────────────────────────────
+# CMF above +0.05 = accumulation (closes near the day's high on volume),
+# below -0.05 = distribution; beyond ±0.25 is strong.
+CMF_THRESHOLD = 0.05
+CMF_STRONG    = 0.25
+
+
+def compute_cmf(hist: pd.DataFrame, period: int = 20) -> float | None:
+    """Chaikin Money Flow over the last `period` days, from -1 to +1.
+
+    Each day's close is placed within its high-low range (+1 at the high,
+    -1 at the low), weighted by volume, and summed over the window relative
+    to total volume. Days with no range (high == low) count as neutral."""
+    if len(hist) < period or not {"High", "Low", "Close", "Volume"} <= set(hist.columns):
+        return None
+    h = hist.iloc[-period:]
+    rng = (h["High"] - h["Low"]).replace(0, float("nan"))
+    mfm = (((h["Close"] - h["Low"]) - (h["High"] - h["Close"])) / rng).fillna(0)
+    vol = h["Volume"].sum()
+    if not vol or pd.isna(vol):
+        return None
+    return round(float((mfm * h["Volume"]).sum() / vol), 3)
+
+
+def cmf_label(cmf: float | None) -> str:
+    if cmf is None:
+        return "N/A"
+    if cmf >=  CMF_STRONG:    return "strong accumulation"
+    if cmf >=  CMF_THRESHOLD: return "accumulation"
+    if cmf <= -CMF_STRONG:    return "strong distribution"
+    if cmf <= -CMF_THRESHOLD: return "distribution"
+    return "neutral"
+
+
 # ── Fetch one ticker ──────────────────────────────────────────────────────────
 # Seconds to wait before each retry when Yahoo rate-limits us.
 RATE_LIMIT_BACKOFF = (10, 30, 60)
@@ -461,7 +497,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -555,6 +591,7 @@ def _fetch_stock_once(ticker: str) -> dict:
     close    = hist["Close"]
     price    = float(price)
     rsi      = compute_rsi(close)
+    cmf      = compute_cmf(hist)
     change1d = round((close.iloc[-1] / close.iloc[-2] - 1) * 100, 2)
 
     # ── Trend: 50 / 200-day moving averages ──────────────────────────────
@@ -634,6 +671,7 @@ def _fetch_stock_once(ticker: str) -> dict:
         "pb":           round(float(pb), 2)  if pb  else None,
         "peg":          round(float(peg), 2) if peg else None,
         "rsi":          rsi,
+        "cmf":          cmf,
         "ma50":         round(ma50, 2)  if ma50  is not None else None,
         "ma200":        round(ma200, 2) if ma200 is not None else None,
         "pct_vs_200":   pct_vs_200,
@@ -773,6 +811,21 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
                        + ", ".join(quality_flags) + ").")
     elif quality_flags:
         reasons.append("Quality watch: " + ", ".join(quality_flags) + ".")
+
+    # Money flow confirms or questions a one-sided call; it never changes it.
+    cmf = stock.get("cmf")
+    if cmf is not None and buy != sell:
+        strength = "strong " if abs(cmf) >= CMF_STRONG else ""
+        if buy and cmf >= CMF_THRESHOLD:
+            reasons.append(f"Money flow: {strength}accumulation (CMF {cmf:+.2f}) supports the buy case.")
+        elif buy and cmf <= -CMF_THRESHOLD:
+            reasons.append(f"Money flow: still {strength}distribution (CMF {cmf:+.2f}); "
+                           "selling pressure hasn't eased.")
+        elif sell and cmf <= -CMF_THRESHOLD:
+            reasons.append(f"Money flow: {strength}distribution (CMF {cmf:+.2f}) supports the sell case.")
+        elif sell and cmf >= CMF_THRESHOLD:
+            reasons.append(f"Money flow: still {strength}accumulation (CMF {cmf:+.2f}); "
+                           "buyers remain active.")
 
     if stock["trend"] and signal != "neutral":
         reasons.append("Trend: 50-day MA is "
@@ -1018,6 +1071,8 @@ def print_report(stocks: list[dict], screened: int) -> None:
         lo_s    = f"{s['pct_off_low']:+.0f}%"  if s["pct_off_low"]  is not None else "N/A"
         short_s = f"{s['pct_short']:.1f}% of float" if s["pct_short"] is not None else "N/A"
         sig_s   = labels.get(s["signal"], s["signal"].upper())
+        cmf     = s.get("cmf")
+        cmf_s   = f"{cmf:+.2f} ({cmf_label(cmf)})" if cmf is not None else "N/A"
         ext_line = None
         if s["ext_price"] is not None:
             ext_s = f"${s['ext_price']:.2f}"
@@ -1040,6 +1095,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
             print(f"  Trend   : {ma200_s:<16} 52wk  : {lo_s} from low / {hi_s} from high")
             print(f"  Expense : {exp_s:<16} Beta  : {beta_s}")
             print(f"  Short   : {short_s:<16} Category: {s['category'] or '—'}")
+            print(f"  MoneyFlw: {cmf_s}")
             print(f"  Signal  : {sig_s}")
             print(f"  {s['thesis']}")
             continue
@@ -1069,6 +1125,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  Trend  : {ma200_s:<15}  52wk  : {lo_s} from low / {hi_s} from high")
         print(f"  Debt/Eq: {dte_s:<10}  Margin: {mgn_s}")
         print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
+        print(f"  MnyFlow: {cmf_s}")
         print(f"  1y Tgt : {tgt_s}")
         print(f"  Sector : {s['sector']}")
         print(f"  Signal : {sig_s}")
@@ -1103,6 +1160,14 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         ma200_s = f"{s['pct_vs_200']:+.0f}%" if s["pct_vs_200"] is not None else "N/A"
         hi_s    = f"{s['pct_off_high']:+.0f}%" if s["pct_off_high"] is not None else "N/A"
         short_s = f"{s['pct_short']:.1f}%" if s["pct_short"] is not None else "N/A"
+        cmf     = s.get("cmf")
+        if cmf is None:
+            cmf_html = "N/A"
+        else:
+            cmf_c = ("#16a34a" if cmf >= CMF_THRESHOLD else
+                     "#dc2626" if cmf <= -CMF_THRESHOLD else "inherit")
+            cmf_html = (f'<span style="color:{cmf_c}">{cmf:+.2f}</span>'
+                        f'<div class="msub">{cmf_label(cmf)}</div>')
         yahoo_url = "https://finance.yahoo.com/quote/" + urllib.parse.quote(s["ticker"])
         tkr_html = (f'<a class="tkr" href="{yahoo_url}" target="_blank" '
                     f'rel="noopener">{s["ticker"]}</a>')
@@ -1139,6 +1204,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Expense ratio</div><div class="mv">{exp_s}</div></div>
             <div><div class="ml">Beta (3y)</div><div class="mv">{beta_s}</div></div>
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
+            <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -1184,6 +1250,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Dividend yield</div><div class="mv">{dy_s}</div></div>
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">1y target (consensus)</div><div class="mv">{tgt_s}</div></div>
+            <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>

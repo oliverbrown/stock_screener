@@ -68,6 +68,21 @@ current price, the low–high target range, the number of analysts, and their
 consensus rating (e.g. `buy`). These are shown for context only; they don't
 feed into the signal.
 
+### Money flow (Chaikin Money Flow)
+
+Every stock and fund also shows its 20-day **Chaikin Money Flow** (CMF),
+from −1 to +1: where each day closed within its high–low range, weighted by
+volume. Above +0.05 is **accumulation** (buyers pushing closes toward the
+day's highs), below −0.05 is **distribution**, and beyond ±0.25 is strong.
+
+CMF never changes a signal. For stocks with a one-sided buy or sell signal,
+it adds a line to the explanation when money flow agrees or disagrees, e.g.
+"Money flow: accumulation (CMF +0.12) supports the buy case" or "Money flow:
+still distribution (CMF −0.10); selling pressure hasn't eased." Funds show
+the value without the commentary, since much ETF volume is market-maker
+creation/redemption rather than real buying and selling. CMF ignores
+overnight gaps.
+
 ### ETFs and other funds
 
 Auto-detected per ticker (via Yahoo's `quoteType`) — no flag needed, and a
