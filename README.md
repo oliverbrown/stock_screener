@@ -100,6 +100,21 @@ how the signal should be read:
 
 It never changes a signal.
 
+### Relative volume
+
+Every stock and fund shows its **relative volume**: average volume over the
+last 5 sessions divided by the average of the 50 sessions before them
+(`1.8×` = 80% above normal), plus the price change over those 5 days.
+1.5× or more is *heavy* (2× *very heavy*), 0.7× or less is *light*. While
+the market is open, today's partial session is left out, so a half-finished
+day doesn't read as light volume.
+
+For stocks with a one-sided buy or sell signal that moved at least 1% in
+those 5 days, the explanation notes the volume behind the move, e.g.
+"sell-off (−9% in 5 days) on heavy volume (1.8× normal), so sellers are
+committed, or capitulating" or "rally (+4% in 5 days) on light volume
+(0.5× normal), so the move lacks conviction." It never changes a signal.
+
 ### Earnings dates
 
 Every stock shows its **next earnings report**: the date, a countdown, and

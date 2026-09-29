@@ -15,6 +15,8 @@ Stocks (equities):
                 whether accumulation/distribution supports the signal
     vs S&P 500— 3m / 6m / 1y total return vs SPY in points; buy signals
                 note long-term laggards and pullbacks in leaders
+    Volume    — 5-day vs 50-day relative volume; one-sided signals note
+                heavy- or light-volume moves
     Earnings  — next report date (before open / after close / estimated);
                 a report within 14 days is flagged, as is one in the last 5
     Info      — analysts' 1-year consensus price target (mean, with low–high
@@ -533,6 +535,48 @@ def benchmark_returns() -> dict | None:
     return data.get("returns") if data else None
 
 
+# ── Relative volume ───────────────────────────────────────────────────────────
+RVOL_RECENT   = 5      # sessions averaged for "recent" volume
+RVOL_BASELINE = 50     # sessions before those, averaged for "normal" volume
+RVOL_HEAVY    = 1.5    # at or above: heavy volume
+RVOL_VERY     = 2.0    # at or above: very heavy volume
+RVOL_LIGHT    = 0.7    # at or below: light volume
+
+
+def compute_rvol(hist: pd.DataFrame, drop_last: bool = False) -> tuple[float | None, float | None]:
+    """(relative volume, % price change) over the last RVOL_RECENT sessions.
+
+    Relative volume is their average volume divided by the average of the
+    RVOL_BASELINE sessions before them, e.g. 1.8 = 80% above normal. Set
+    drop_last while today's session is still trading, so a partial day
+    doesn't read as light volume. Zero-volume days are ignored."""
+    if drop_last:
+        hist = hist.iloc[:-1]
+    need = RVOL_RECENT + RVOL_BASELINE
+    if len(hist) < need + 1 or "Volume" not in hist:
+        return None, None
+    vol = hist["Volume"].replace(0, float("nan"))
+    recent, base = vol.iloc[-RVOL_RECENT:].mean(), vol.iloc[-need:-RVOL_RECENT].mean()
+    if pd.isna(recent) or pd.isna(base) or not base:
+        return None, None
+    close = hist["Close"]
+    start = float(close.iloc[-RVOL_RECENT - 1])
+    chg = round((float(close.iloc[-1]) / start - 1) * 100, 1) if start else None
+    return round(float(recent / base), 2), chg
+
+
+def rvol_label(rvol: float | None) -> str:
+    if rvol is None:
+        return "N/A"
+    if rvol >= RVOL_VERY:
+        return "very heavy"
+    if rvol >= RVOL_HEAVY:
+        return "heavy"
+    if rvol <= RVOL_LIGHT:
+        return "light"
+    return "normal"
+
+
 # ── Earnings dates ────────────────────────────────────────────────────────────
 # A report within this many days gets a warning chip and a thesis note.
 EARNINGS_WARN_DAYS   = 14
@@ -683,7 +727,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 6
+    VERSION = 7
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -860,6 +904,11 @@ def _fetch_stock_once(ticker: str) -> dict:
 
     # ── Extended hours: only while the pre / post session is open ────────
     market_state = (info.get("marketState") or "").upper()
+
+    # Today's bar is partial while the session is trading (always, for 24/7
+    # crypto), so leave it out of the volume comparison.
+    last_bar_today = hist.index[-1].date() == market_today()
+    rvol, chg_5d = compute_rvol(hist, drop_last=last_bar_today and market_state in ("PRE", "REGULAR"))
     ext_session, ext_price, ext_change = None, None, None
     if market_state == "PRE":
         ext_session = "pre"
@@ -890,6 +939,8 @@ def _fetch_stock_once(ticker: str) -> dict:
         "rsi":          rsi,
         "cmf":          cmf,
         "returns":      returns,
+        "rvol":         rvol,
+        "chg_5d":       chg_5d,
         "earnings_next": earnings_next,
         "earnings_last": earnings_last,
         "ma50":         round(ma50, 2)  if ma50  is not None else None,
@@ -1060,6 +1111,19 @@ def classify_signal(stock: dict, max_pe: float | None) -> tuple[str, list[str], 
               and rel["3m"] <= PULLBACK_PTS):
             reasons.append(f"Pullback in a leader: {rel['1y']:+.0f} pts vs the S&P 500 over 1 year, "
                            f"{rel['3m']:+.0f} over 3 months.")
+
+    # Volume behind the latest move: conviction, or the lack of it.
+    rvol, chg_5d = stock.get("rvol"), stock.get("chg_5d")
+    if rvol is not None and chg_5d is not None and buy != sell and abs(chg_5d) >= 1:
+        move = "Sell-off" if chg_5d < 0 else "Rally"
+        pct = f"{chg_5d:+.0f}% in 5 days"
+        if rvol >= RVOL_HEAVY:
+            reasons.append(f"Volume: {move.lower()} ({pct}) on heavy volume ({rvol:.1f}× normal), "
+                           + ("so sellers are committed, or capitulating." if chg_5d < 0
+                              else "so buyers are committed."))
+        elif rvol <= RVOL_LIGHT:
+            reasons.append(f"Volume: {move.lower()} ({pct}) on light volume ({rvol:.1f}× normal), "
+                           "so the move lacks conviction.")
 
     # Money flow confirms or questions a one-sided call; it never changes it.
     cmf = stock.get("cmf")
@@ -1353,6 +1417,10 @@ def print_report(stocks: list[dict], screened: int) -> None:
         cmf     = s.get("cmf")
         cmf_s   = f"{cmf:+.2f} ({cmf_label(cmf)})" if cmf is not None else "N/A"
         rel     = s.get("rel")
+        rvol    = s.get("rvol")
+        rvol_s  = (f"{rvol:.2f}× normal ({rvol_label(rvol)})"
+                   + (f", price {s['chg_5d']:+.1f}% over 5 days" if s.get("chg_5d") is not None else "")
+                   if rvol is not None else "N/A")
         rel_s   = ("  ".join(f"{k} {'N/A' if v is None else f'{v:+.1f}'}" for k, v in rel.items())
                    + " pts" if rel else "N/A")
         ext_line = None
@@ -1379,6 +1447,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
             print(f"  Short   : {short_s:<16} Category: {s['category'] or '—'}")
             print(f"  MoneyFlw: {cmf_s}")
             print(f"  vs S&P  : {rel_s}")
+            print(f"  Volume  : {rvol_s}")
             print(f"  Signal  : {sig_s}")
             print(f"  {s['thesis']}")
             continue
@@ -1414,6 +1483,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
         print(f"  Div Yld: {dy_s:<10}  Short : {short_s}")
         print(f"  MnyFlow: {cmf_s}")
         print(f"  vs S&P : {rel_s}")
+        print(f"  Volume : {rvol_s}")
         if s.get("earnings_next"):
             n = earnings_days(s)
             warn = "⚠ " if n <= EARNINGS_WARN_DAYS else ""
@@ -1461,6 +1531,13 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
                      "#dc2626" if cmf <= -CMF_THRESHOLD else "inherit")
             cmf_html = (f'<span style="color:{cmf_c}">{cmf:+.2f}</span>'
                         f'<div class="msub">{cmf_label(cmf)}</div>')
+        rvol = s.get("rvol")
+        if rvol is not None:
+            rvol_c = "#b45309" if rvol >= RVOL_HEAVY else "inherit"
+            sub = rvol_label(rvol) + (f" &middot; price {s['chg_5d']:+.1f}%" if s.get("chg_5d") is not None else "")
+            rvol_html = f'<span style="color:{rvol_c}">{rvol:.2f}×</span><div class="msub">{sub}</div>'
+        else:
+            rvol_html = "N/A"
         rel = s.get("rel")
         if rel and rel.get("1y") is not None:
             rel_c = "#16a34a" if rel["1y"] >= 0 else "#dc2626"
@@ -1516,6 +1593,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">Short % float</div><div class="mv">{short_s}</div></div>
             <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
             <div><div class="ml">vs S&amp;P 500</div><div class="mv">{rel_html}</div></div>
+            <div><div class="ml">Rel. volume (5d)</div><div class="mv">{rvol_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
           <div class="thesis">{s['thesis']}</div>
@@ -1571,6 +1649,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
             <div><div class="ml">1y target (consensus)</div><div class="mv">{tgt_s}</div></div>
             <div><div class="ml">Money flow (CMF 20d)</div><div class="mv">{cmf_html}</div></div>
             <div><div class="ml">vs S&amp;P 500</div><div class="mv">{rel_html}</div></div>
+            <div><div class="ml">Rel. volume (5d)</div><div class="mv">{rvol_html}</div></div>
             <div><div class="ml">Next earnings</div><div class="mv">{earn_html}</div></div>
             <div><div class="ml">Today</div><div class="mv" style="color:{chg_c}">{chg_s}</div></div>
           </div>
