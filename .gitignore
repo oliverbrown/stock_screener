@@ -10,6 +10,7 @@ venv/
 files.zip
 logs/
 cache/
+watchlists/
 ticker-lists/
 
 # personal ticker lists / watchlists
