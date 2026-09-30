@@ -53,6 +53,11 @@ Usage:
     python3 stock_screener.py --index sp500 --signal sell --ascii   # plain-ASCII output
     python3 stock_screener.py --index sp500 --output daily.html    # writes daily-sp500.html
     python3 stock_screener.py --list-indices           # show all available indices
+    python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --where "pe<15" \
+        --where "fcf_yield>=5" --sort-by fcf_yield:desc --top 20 --save-tickers watch.txt
+    python3 stock_screener.py --tickers-file ticker-lists/us-all.txt --cache-only \
+        --where "market_cap>=2B" --where "rsi<30"      # re-filter cached data, no downloads
+    python3 stock_screener.py --list-fields            # fields --where can use
 
 Requirements:
     pip install yfinance pandas
@@ -70,6 +75,7 @@ import random
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
+from html import escape as html_escape
 import warnings
 from datetime import date, datetime, timezone
 
@@ -727,7 +733,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 7
+    VERSION = 8
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -782,6 +788,8 @@ class TickerCache:
 
 # Set by main() unless --no-cache; None means always download.
 CACHE: TickerCache | None = None
+# --cache-only: never download; tickers not in the cache are skipped.
+CACHE_ONLY = False
 
 
 # When any thread is rate-limited, every thread waits until this time before
@@ -811,6 +819,8 @@ def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
         cached = CACHE.get(ticker)
         if cached is not None:
             return cached, None
+    if CACHE_ONLY:
+        return None, "not in cache"
     for wait in (*RATE_LIMIT_BACKOFF, None):
         _wait_for_cooldown()
         try:
@@ -874,6 +884,16 @@ def _fetch_stock_once(ticker: str) -> dict:
         pe = info.get("trailingPE") or info.get("forwardPE")
     pb, pb_note = sanitize_pb(info)
     fcf_y, fcf_note = fcf_yield(info)
+
+    # ── Size, liquidity and extra fundamentals (for --where filters) ──────
+    mcap     = info.get("marketCap")
+    avg_vol  = info.get("averageVolume")
+    fwd_pe   = info.get("forwardPE")
+    roe      = info.get("returnOnEquity")          # fraction, e.g. 0.18
+    ev_ebitda = info.get("enterpriseToEbitda")
+    if info.get("financialCurrency") and info.get("currency") \
+            and info["financialCurrency"] != info["currency"]:
+        ev_ebitda = None                           # ADR: EV in USD, EBITDA in local currency
     peg    = info.get("trailingPegRatio") or info.get("pegRatio")
     dte    = info.get("debtToEquity")          # already expressed as a percentage
     margin = info.get("profitMargins")         # fraction, e.g. -0.05
@@ -935,6 +955,13 @@ def _fetch_stock_once(ticker: str) -> dict:
         "pb_note":      pb_note,
         "fcf_yield":    fcf_y,
         "fcf_note":     fcf_note,
+        "market_cap":   int(mcap) if mcap else None,
+        "fund_assets":  int(info["totalAssets"]) if info.get("totalAssets") else None,
+        "avg_volume":   int(avg_vol) if avg_vol else None,
+        "dollar_volume": int(avg_vol * price) if avg_vol else None,
+        "forward_pe":   round(float(fwd_pe), 1) if fwd_pe and fwd_pe > 0 else None,
+        "ev_ebitda":    round(float(ev_ebitda), 1) if ev_ebitda else None,
+        "roe":          round(float(roe) * 100, 1) if roe is not None else None,
         "peg":          round(float(peg), 2) if peg else None,
         "rsi":          rsi,
         "cmf":          cmf,
@@ -1254,6 +1281,194 @@ def classify_fund(fund: dict, max_pe: float | None) -> tuple[str, list[str], str
     return signal, tags, " ".join(reasons)
 
 
+# ── Filters: --where, --sort-by, --top, --save-tickers, --csv ─────────────────
+def _nested(key: str, sub: str):
+    return lambda s: (s.get(key) or {}).get(sub)
+
+
+# Every field --where / --sort-by / --csv can use: name -> (kind, unit, description, getter).
+# "num" fields compare numerically; "text" fields compare case-insensitively
+# with = and != only. A ticker missing a field never matches a condition on it.
+FIELDS = {
+    # identity
+    "ticker":        ("text", "",        "ticker symbol",                          lambda s: s.get("ticker")),
+    "name":          ("text", "",        "company or fund name",                   lambda s: s.get("name")),
+    "sector":        ("text", "",        "sector, e.g. Technology (stocks)",       lambda s: s.get("sector")),
+    "category":      ("text", "",        "fund category, e.g. Large Blend",        lambda s: s.get("category")),
+    "quote_type":    ("text", "",        "EQUITY, ETF, MUTUALFUND, …",             lambda s: s.get("quote_type")),
+    "signal":        ("text", "",        "headline signal, e.g. buy, oversold",    lambda s: s.get("signal")),
+    "tag":           ("text", "",        "has this tag (tag=oversold); != lacks it", lambda s: s.get("tags")),
+    # price & size
+    "price":         ("num",  "$",       "last price",                             lambda s: s.get("price")),
+    "change1d":      ("num",  "%",       "change today",                           lambda s: s.get("change1d")),
+    "market_cap":    ("num",  "$",       "market capitalisation (stocks)",         lambda s: s.get("market_cap")),
+    "fund_assets":   ("num",  "$",       "total fund assets (ETFs / funds)",       lambda s: s.get("fund_assets")),
+    "avg_volume":    ("num",  "shares",  "average daily volume (3 months)",        lambda s: s.get("avg_volume")),
+    "dollar_volume": ("num",  "$",       "average daily $ traded (avg_volume × price)", lambda s: s.get("dollar_volume")),
+    # valuation
+    "pe":            ("num",  "x",       "P/E (trailing; holdings P/E for funds)", lambda s: s.get("pe")),
+    "forward_pe":    ("num",  "x",       "forward P/E",                            lambda s: s.get("forward_pe")),
+    "peg":           ("num",  "x",       "PEG ratio",                              lambda s: s.get("peg")),
+    "pb":            ("num",  "x",       "price / book",                           lambda s: s.get("pb")),
+    "ev_ebitda":     ("num",  "x",       "enterprise value / EBITDA",              lambda s: s.get("ev_ebitda")),
+    "fcf_yield":     ("num",  "%",       "free cash flow / market cap",            lambda s: s.get("fcf_yield")),
+    "div_yield":     ("num",  "%",       "dividend yield (stocks)",                lambda s: s.get("div_yield")),
+    "fund_yield":    ("num",  "%",       "distribution yield (funds)",             lambda s: s.get("fund_yield")),
+    "target_upside": ("num",  "%",       "analyst 1y consensus target vs price",   lambda s: s.get("target_upside")),
+    "num_analysts":  ("num",  "",        "analysts covering",                      lambda s: s.get("num_analysts")),
+    # quality
+    "margin":        ("num",  "%",       "profit margin",                          lambda s: s.get("margin")),
+    "roe":           ("num",  "%",       "return on equity",                       lambda s: s.get("roe")),
+    "debt_equity":   ("num",  "%",       "debt / equity",                          lambda s: s.get("debt_equity")),
+    "pct_short":     ("num",  "%",       "short interest, % of float",             lambda s: s.get("pct_short")),
+    "beta":          ("num",  "",        "beta",                                   lambda s: s.get("beta")),
+    # funds
+    "nav_premium":   ("num",  "%",       "price vs NAV (funds)",                   lambda s: s.get("nav_premium")),
+    "expense":       ("num",  "%",       "expense ratio (funds)",                  lambda s: s.get("expense")),
+    # momentum & trend
+    "rsi":           ("num",  "",        "RSI (14 days)",                          lambda s: s.get("rsi")),
+    "cmf":           ("num",  "",        "Chaikin Money Flow (20 days), -1..+1",   lambda s: s.get("cmf")),
+    "rvol":          ("num",  "x",       "relative volume, 5 vs 50 days",          lambda s: s.get("rvol")),
+    "chg_5d":        ("num",  "%",       "price change over 5 days",               lambda s: s.get("chg_5d")),
+    "pct_vs_200":    ("num",  "%",       "price vs 200-day average",               lambda s: s.get("pct_vs_200")),
+    "pct_off_high":  ("num",  "%",       "vs 52-week high (<= 0)",                 lambda s: s.get("pct_off_high")),
+    "pct_off_low":   ("num",  "%",       "vs 52-week low (>= 0)",                  lambda s: s.get("pct_off_low")),
+    "ret_3m":        ("num",  "%",       "total return, 3 months",                 _nested("returns", "3m")),
+    "ret_6m":        ("num",  "%",       "total return, 6 months",                 _nested("returns", "6m")),
+    "ret_1y":        ("num",  "%",       "total return, 1 year",                   _nested("returns", "1y")),
+    "rel_3m":        ("num",  "pts",     "3-month return minus the S&P 500's",     _nested("rel", "3m")),
+    "rel_6m":        ("num",  "pts",     "6-month return minus the S&P 500's",     _nested("rel", "6m")),
+    "rel_1y":        ("num",  "pts",     "1-year return minus the S&P 500's",      _nested("rel", "1y")),
+    # events
+    "earnings_days": ("num",  "days",    "days until next earnings (0 = today)",   lambda s: earnings_days(s)),
+}
+
+_OPS = {
+    "<":  lambda a, b: a < b,  "<=": lambda a, b: a <= b,
+    ">":  lambda a, b: a > b,  ">=": lambda a, b: a >= b,
+    "=":  lambda a, b: a == b, "!=": lambda a, b: a != b,
+}
+_SUFFIX = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
+
+
+class Condition:
+    """One parsed --where condition, e.g. "market_cap>=2B" or "sector=Energy"."""
+
+    def __init__(self, text: str):
+        m = re.fullmatch(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|!=|==|=|<|>)\s*(.+?)\s*", text)
+        if not m:
+            raise ValueError(f"can't parse {text!r}; expected FIELD OP VALUE, e.g. \"pe<20\"")
+        field, op, raw = m.group(1).lower(), m.group(2).replace("==", "="), m.group(3)
+        if field not in FIELDS:
+            import difflib
+            close = difflib.get_close_matches(field, FIELDS, n=3, cutoff=0.6)
+            hint = f" (did you mean {', '.join(close)}?)" if close else ""
+            raise ValueError(f"unknown field {field!r}{hint}; see --list-fields")
+        kind = FIELDS[field][0]
+        if kind == "text":
+            if op not in ("=", "!="):
+                raise ValueError(f"{field} is text; use = or != (got {op})")
+            value = raw.strip("\"'").lower()
+        else:
+            value = self._number(raw, text)
+        self.text, self.field, self.op, self.value, self.kind = text.strip(), field, op, value, kind
+
+    @staticmethod
+    def _number(raw: str, text: str) -> float:
+        r = raw.strip().rstrip("%").replace(",", "").replace("_", "")
+        mult = 1.0
+        if r and r[-1].upper() in _SUFFIX:
+            mult, r = _SUFFIX[r[-1].upper()], r[:-1]
+        try:
+            return float(r) * mult
+        except ValueError:
+            raise ValueError(f"{text!r}: {raw!r} isn't a number (suffixes K, M, B, T are allowed)")
+
+    def matches(self, stock: dict) -> bool:
+        got = FIELDS[self.field][3](stock)
+        if got is None or (isinstance(got, float) and got != got):       # missing / NaN
+            return False
+        if self.field == "tag":                                            # list membership
+            has = self.value in [t.lower() for t in got]
+            return has if self.op == "=" else not has
+        if self.kind == "text":
+            return _OPS[self.op](str(got).lower(), self.value)
+        return _OPS[self.op](float(got), self.value)
+
+
+def parse_sort(spec: str) -> tuple[str, bool]:
+    """"fcf_yield:desc" -> ("fcf_yield", True). Ascending unless :desc."""
+    field, _, direction = spec.partition(":")
+    field, direction = field.strip().lower(), direction.strip().lower() or "asc"
+    if field not in FIELDS or field == "tag":
+        raise ValueError(f"can't sort by {field!r}; see --list-fields")
+    if direction not in ("asc", "desc"):
+        raise ValueError(f"sort direction must be asc or desc, not {direction!r}")
+    return field, direction == "desc"
+
+
+def apply_filters(stocks: list[dict], conditions: list[Condition] = (),
+                  sort: tuple[str, bool] | None = None, top: int | None = None) -> list[dict]:
+    """Keep stocks matching every condition, optionally sorted (missing
+    values always last) and cut to the first `top`."""
+    out = [s for s in stocks if all(c.matches(s) for c in conditions)]
+    if sort:
+        field, desc = sort
+        getter, kind = FIELDS[field][3], FIELDS[field][0]
+        have = [s for s in out if getter(s) is not None]
+        lack = [s for s in out if getter(s) is None]
+        key = (lambda s: str(getter(s)).lower()) if kind == "text" else (lambda s: float(getter(s)))
+        out = sorted(have, key=key, reverse=desc) + lack
+    return out[:top] if top else out
+
+
+def describe_filters(conditions, sort, top) -> str:
+    parts = [c.text for c in conditions]
+    if sort:
+        parts.append(f"sorted by {sort[0]} {'desc' if sort[1] else 'asc'}")
+    if top:
+        parts.append(f"top {top}")
+    return ", ".join(parts)
+
+
+def list_fields_text() -> str:
+    lines = ["Fields for --where, --sort-by and --csv:", ""]
+    for name, (kind, unit, desc, _) in FIELDS.items():
+        u = f" [{unit}]" if unit else ""
+        lines.append(f"  {name:<14} {kind:<4}  {desc}{u}")
+    lines += ["", "Operators: < <= > >= = !=   Numbers may use K/M/B/T and %, e.g. market_cap>=2B",
+              "Text fields (sector, name, …) compare case-insensitively with = or !=.",
+              "A ticker missing a field never matches a condition on it."]
+    return "\n".join(lines)
+
+
+def save_ticker_list(stocks: list[dict], path: str, description: str = "") -> None:
+    """Write matches as a TICKER # name file, ready for --tickers-file."""
+    width = max((len(s["ticker"]) for s in stocks), default=0) + 1
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# Watch list — {len(stocks)} tickers, saved "
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M')} by stock_screener.py\n")
+        if description:
+            f.write(f"# Criteria: {description}\n")
+        f.write("\n")
+        for s in stocks:
+            f.write(f"{s['ticker']:<{width}}# {s.get('name') or ''}\n")
+
+
+def save_csv(stocks: list[dict], path: str) -> None:
+    """Every field (plus next earnings date and thesis) for each match."""
+    import csv
+    cols = [f for f in FIELDS if f != "tag"] + ["tags", "earnings_date", "thesis"]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(cols)
+        for s in stocks:
+            row = [FIELDS[c][3](s) for c in cols[:-3]]
+            row += [" ".join(s.get("tags") or []),
+                    (s.get("earnings_next") or {}).get("date", ""), s.get("thesis", "")]
+            w.writerow(["" if v is None else v for v in row])
+
+
 # ── Screen runner ─────────────────────────────────────────────────────────────
 def run_screen(
     tickers:       list[str],
@@ -1264,6 +1479,7 @@ def run_screen(
     batch_size:    int         = 20,
     delay:         float       = 1.0,
     workers:       int         = 1,
+    progress:      bool        = True,
 ) -> tuple[list[dict], int]:
     """
     Screen tickers, downloading with `workers` threads in parallel. With one
@@ -1309,7 +1525,7 @@ def run_screen(
         return ticker, stock, from_cache, None, None
 
     def report(n: int, ticker: str, stock, from_cache: bool, note) -> None:
-        if not verbose:
+        if not (verbose and progress):
             return
         if note:
             print(f"  [{n:>4}/{total}] {ticker:<8}{note}")
@@ -1357,12 +1573,24 @@ def run_screen(
     skipped = [(t, fail_why[t]) for t in tickers if t in fail_why]
 
     if verbose and CACHE is not None:
-        print(f"\n  Data: {total - fetched} ticker(s) from cache, {fetched} downloaded")
+        ages = [s["cached_min"] for s in results if s.get("cached_min") is not None]
+        oldest = f" (oldest {max(ages) // 60}h {max(ages) % 60}m ago)" if ages else ""
+        # In --cache-only mode misses aren't downloads, just skips
+        downloaded = 0 if CACHE_ONLY else fetched
+        print(f"\n  Data: {len(ages)} ticker(s) from cache{oldest}, {downloaded} downloaded")
 
     if verbose and skipped:
         print(f"\n  Skipped {len(skipped)} of {total} ticker(s):")
-        for tkr, why in skipped:
-            print(f"    {tkr:<8} {why}")
+        if len(skipped) <= 25:
+            for tkr, why in skipped:
+                print(f"    {tkr:<8} {why}")
+        else:                                        # too many to list: group by reason
+            groups = {}
+            for tkr, why in skipped:
+                groups.setdefault(why, []).append(tkr)
+            for why, tkrs in sorted(groups.items(), key=lambda g: -len(g[1])):
+                more = f", … (+{len(tkrs) - 8})" if len(tkrs) > 8 else ""
+                print(f"    {len(tkrs):>6} × {why}: {', '.join(tkrs[:8])}{more}")
 
     # Apply signal filter
     def _passes(stock: dict) -> bool:
@@ -1499,7 +1727,7 @@ def print_report(stocks: list[dict], screened: int) -> None:
 
 # ── HTML report ───────────────────────────────────────────────────────────────
 def save_html_report(stocks: list[dict], screened: int, path: str,
-                     index_label: str = "") -> None:
+                     index_label: str = "", criteria: str = "") -> None:
     date_str = datetime.now().strftime("%B %d, %Y  %H:%M")
     badge = {
         "buy":         ("Buy signal",   "#eff6ff", "#2563eb"),
@@ -1714,6 +1942,7 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
     <strong>{len(stocks)} result(s) matched</strong>
     <span>{screened} tickers analyzed</span>
   </div>
+  {f'<p class="sub" style="margin:-4px 0 12px">Filters: {html_escape(criteria)}</p>' if criteria else ''}
   {cards}{empty}
   <p class="disc">Not financial advice. For informational purposes only.<br>
   Always do your own research before making investment decisions.</p>
@@ -1772,13 +2001,32 @@ when STOCK_SCREENER_ASCII is set.
                         choices=["flagged", "buy", "sell", "hold", "all",
                                  "undervalued", "oversold", "overvalued", "overbought",
                                  "overextended"],
-                        default="flagged",
-                        help="Which signals to include (default: flagged = any non-neutral; "
+                        default=None,
+                        help="Which signals to include (default: flagged = any non-neutral, "
+                             "or all when --where is used; "
                              "buy = undervalued/oversold; sell = overvalued/overbought/overextended; "
                              "hold = no signal either way)")
     parser.add_argument("--asset-type", choices=["all", "stock", "etf"], default="all",
                         help="Restrict to equities only or ETFs only (default: all). "
                              "Type is auto-detected per ticker.")
+    parser.add_argument("--where", action="append", default=[], metavar="COND",
+                        help='Keep only tickers matching COND, e.g. "pe<20", "market_cap>=2B", '
+                             '"sector=Energy", "tag=oversold". Repeat to require several. '
+                             "See --list-fields")
+    parser.add_argument("--sort-by", metavar="FIELD[:desc]",
+                        help="Sort matches by a field, ascending unless :desc (e.g. fcf_yield:desc)")
+    parser.add_argument("--top", type=int, metavar="N", help="Keep only the first N matches")
+    parser.add_argument("--save-tickers", metavar="FILE",
+                        help="Save matches as a TICKER # name watch list for --tickers-file")
+    parser.add_argument("--csv", metavar="FILE", help="Save every field for each match as CSV")
+    parser.add_argument("--list-fields", action="store_true",
+                        help="Show the fields --where / --sort-by / --csv can use, and exit")
+    parser.add_argument("--cache-only", action="store_true",
+                        help="Never download: screen only tickers already in the cache (any age "
+                             "up to a day, or --cache-minutes if longer). Pair with a morning run "
+                             "that fills the cache to re-filter the whole market in seconds")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Don't print a progress line per ticker (summary and report still print)")
     parser.add_argument("--max-pe",  type=float, default=None, metavar="N",
                         help="Only include names with P/E below N (holdings P/E for funds)")
     parser.add_argument("--output",  type=str, default=None, metavar="FILE.html",
@@ -1809,6 +2057,24 @@ when STOCK_SCREENER_ASCII is set.
                         help="Show available indices and exit")
     args = parser.parse_args()
 
+    if args.list_fields:
+        print(list_fields_text())
+        return
+
+    # Validate filters up front, before any downloading
+    try:
+        conditions = [Condition(c) for c in args.where]
+        sort = parse_sort(args.sort_by) if args.sort_by else None
+    except ValueError as e:
+        parser.error(str(e))
+    if args.top is not None and args.top < 1:
+        parser.error("--top must be at least 1")
+    if args.cache_only and args.no_cache:
+        parser.error("--cache-only needs the cache; drop --no-cache")
+    if args.signal is None:
+        args.signal = "all" if conditions else "flagged"
+    criteria = describe_filters(conditions, sort, args.top)
+
     if args.list_indices:
         print("\nAvailable indices:\n")
         for key, meta in INDICES.items():
@@ -1826,11 +2092,17 @@ when STOCK_SCREENER_ASCII is set.
     sys.stdout = _Tee(sys.__stdout__, log_file, ascii_only=ASCII_OUTPUT)
     sys.stderr = _Tee(sys.__stderr__, log_file, ascii_only=ASCII_OUTPUT)
 
-    global CACHE
+    global CACHE, CACHE_ONLY
     cache_min = 0 if args.no_cache else args.cache_minutes
-    if cache_min > 0:
+    # Entries are kept for a day, or longer if --cache-minutes asks for more
+    keep_hours = max(24, cache_min / 60)
+    if args.cache_only:
+        CACHE_ONLY = True
+        CACHE = TickerCache(args.cache_dir, keep_hours * 60)   # any age we still keep
+        CACHE.prune(keep_hours)
+    elif cache_min > 0:
         CACHE = TickerCache(args.cache_dir, cache_min)
-        CACHE.prune()
+        CACHE.prune(keep_hours)
 
     try:
         if old_logs:
@@ -1858,12 +2130,18 @@ when STOCK_SCREENER_ASCII is set.
         print(f"Signal  : {args.signal}")
         print(f"Assets  : {args.asset_type}")
         print(f"Max P/E : {args.max_pe or 'none'}")
+        if criteria:
+            print(f"Filters : {criteria}")
         print(f"Workers : {max(1, args.workers)}")
         print(f"Output  : {out_path or 'terminal only'}")
         print(f"Run log : {os.path.abspath(log_path)}")
-        print(f"Cache   : " + (f"reuse data up to {cache_min:g} min old ({os.path.abspath(args.cache_dir)})"
-                               if CACHE else "off"))
-        print(f"\nFetching live data from Yahoo Finance…\n")
+        if CACHE_ONLY:
+            print(f"Cache   : cache only, no downloads ({os.path.abspath(args.cache_dir)})")
+            print("\nScreening cached data…\n")
+        else:
+            print(f"Cache   : " + (f"reuse data up to {cache_min:g} min old ({os.path.abspath(args.cache_dir)})"
+                                   if CACHE else "off"))
+            print(f"\nFetching live data from Yahoo Finance…\n")
 
         stocks, screened = run_screen(
             tickers       = tickers,
@@ -1872,13 +2150,24 @@ when STOCK_SCREENER_ASCII is set.
             asset_type    = args.asset_type,
             verbose       = True,
             workers       = max(1, args.workers),
+            progress      = not args.quiet,
         )
+        if criteria:
+            before = len(stocks)
+            stocks = apply_filters(stocks, conditions, sort, args.top)
+            print(f"\n  Filters: {before} → {len(stocks)} ticker(s)  ({criteria})")
 
         print_report(stocks, screened)
 
         if out_path:
-            save_html_report(stocks, screened, out_path, index_label)
+            save_html_report(stocks, screened, out_path, index_label, criteria)
             print(f"  HTML report saved → {os.path.abspath(out_path)}\n")
+        if args.save_tickers:
+            save_ticker_list(stocks, args.save_tickers, criteria)
+            print(f"  Watch list saved → {os.path.abspath(args.save_tickers)}  ({len(stocks)} tickers)\n")
+        if args.csv:
+            save_csv(stocks, args.csv)
+            print(f"  CSV saved        → {os.path.abspath(args.csv)}\n")
     finally:
         print(f"  Run log saved  → {os.path.abspath(log_path)}\n")
         sys.stdout = sys.__stdout__

@@ -266,6 +266,58 @@ script to refresh. The generated files are gitignored.
 --max-pe 20                  # only names with P/E under 20 (holdings P/E for funds)
 ```
 
+## Custom filters and watch lists
+
+Beyond the built-in signals, you can filter on any data field, rank the
+results, and save them as a watch list:
+
+```bash
+python3 stock_screener.py --tickers-file ticker-lists/sp500.txt \
+    --where "fcf_yield>=5" --where "pe<20" --where "debt_equity<100" \
+    --where "rel_1y>0" --where "earnings_days>7" \
+    --sort-by fcf_yield:desc --top 10 --save-tickers watch.txt --csv watch.csv
+```
+
+| Option | What it does |
+|---|---|
+| `--where "FIELD OP VALUE"` | Keep tickers matching the condition; repeat to require several. Operators `< <= > >= = !=`; numbers may use `K`/`M`/`B`/`T` and `%` (`market_cap>=2B`). Text fields compare case-insensitively (`sector=Energy`); `tag=oversold` checks the signal tags |
+| `--list-fields` | Every field you can use (valuation, quality, size, liquidity, momentum, returns vs the S&P 500, `earnings_days`, …) with units |
+| `--sort-by FIELD[:desc]` | Rank matches; tickers missing the field go last |
+| `--top N` | Keep the first N matches |
+| `--save-tickers FILE` | Save matches as a `TICKER # name` watch list for `--tickers-file` |
+| `--csv FILE` | Save every field for each match, for a spreadsheet |
+| `--quiet` | No per-ticker progress lines |
+
+With `--where`, `--signal` defaults to `all`, so only your conditions apply;
+add e.g. `--signal buy` to combine them with the built-in signals. A ticker
+**missing** a field never matches a condition on it — `pe<15` drops
+loss-making companies (they have no P/E), and `market_cap` is empty for ETFs
+(use `fund_assets`).
+
+Useful extra fields: `market_cap`, `dollar_volume` (average daily $ traded —
+filter out illiquid micro-caps in `us-all`), `forward_pe`, `ev_ebitda`,
+`roe`. High FCF yields are common among insurers (their cash flow includes
+premiums they'll later pay out); add `--where "sector!=Financial Services"`
+to leave them out.
+
+### Filter the whole market in seconds: `--cache-only`
+
+Fill the cache once (e.g. each morning), then re-filter as often as you like
+without downloading anything:
+
+```bash
+# ~15-20 min for all ~11,700 US stocks and ETFs
+python3 stock_screener.py --tickers-file ticker-lists/us-all.txt --signal all --workers 8 --quiet
+
+# then, instantly
+python3 stock_screener.py --tickers-file ticker-lists/us-all.txt --cache-only --quiet \
+    --where "market_cap>=2B" --where "dollar_volume>=10M" --where "rsi<30" --sort-by rsi
+```
+
+`--cache-only` uses cached data of any age up to a day (or `--cache-minutes`,
+if longer), never contacts Yahoo, and skips tickers that aren't cached. The
+`Data:` line shows how old the oldest data is.
+
 ## Output
 
 ```bash
