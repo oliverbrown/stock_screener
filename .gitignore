@@ -15,6 +15,7 @@ ticker-lists/
 # personal ticker lists / watchlists
 my-tickers.txt
 my-*.txt
+my-*.toml
 *-tickers.txt
 tickers*.txt
 watchlist*.txt

@@ -58,6 +58,8 @@ Usage:
     python3 stock_screener.py --tickers-file ticker-lists/us-all.txt --cache-only \
         --where "market_cap>=2B" --where "rsi<30"      # re-filter cached data, no downloads
     python3 stock_screener.py --list-fields            # fields --where can use
+    python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --screen quality-value
+    python3 stock_screener.py --list-screens           # saved screens (screens.toml)
 
 Requirements:
     pip install yfinance pandas
@@ -1000,6 +1002,9 @@ def _fetch_stock_once(ticker: str) -> dict:
 
 # ── Signal classifier ─────────────────────────────────────────────────────────
 # Atomic tags a stock can earn. The headline `signal` is derived from these.
+# Values for --signal (and a saved screen's "signal").
+SIGNAL_CHOICES = ["flagged", "buy", "sell", "hold", "all",
+                  "undervalued", "oversold", "overvalued", "overbought", "overextended"]
 BUY_TAGS  = ("undervalued", "oversold")
 SELL_TAGS = ("overvalued", "overbought", "overextended")
 
@@ -1420,6 +1425,122 @@ def apply_filters(stocks: list[dict], conditions: list[Condition] = (),
         key = (lambda s: str(getter(s)).lower()) if kind == "text" else (lambda s: float(getter(s)))
         out = sorted(have, key=key, reverse=desc) + lack
     return out[:top] if top else out
+
+
+class OneOf:
+    """--sector / --exclude-sector: the field equals any of the values
+    (case-insensitive), or with exclude=True, none of them. Tickers without
+    the field (e.g. ETFs have no sector) fail an include and pass an exclude."""
+
+    def __init__(self, field: str, values: list[str], exclude: bool = False):
+        self.field, self.exclude = field, exclude
+        self.values = {v.strip().lower() for v in values}
+        shown = ", ".join(v.strip() for v in values)
+        self.text = f"{field} {'not ' if exclude else ''}in ({shown})"
+
+    def matches(self, stock: dict) -> bool:
+        got = FIELDS[self.field][3](stock)
+        hit = got is not None and str(got).lower() in self.values
+        return not hit if self.exclude else hit
+
+
+class NoEarningsWithin:
+    """--no-earnings-within N: drop tickers reporting in the next N days.
+    Unlike --where "earnings_days>N", tickers with no known date (ETFs,
+    unannounced) are kept."""
+
+    def __init__(self, days: int):
+        self.days = days
+        self.text = f"no earnings within {days} days"
+
+    def matches(self, stock: dict) -> bool:
+        n = earnings_days(stock)
+        return n is None or n < 0 or n > self.days
+
+
+# ── Saved screens (screens.toml, my-screens.toml) ─────────────────────────────
+SCREEN_FILES = ("screens.toml", "my-screens.toml")   # later files override earlier ones
+SCREEN_KEYS = {
+    "description": str, "where": list, "signal": str, "asset_type": str,
+    "sort_by": str, "top": int, "sector": list, "exclude_sector": list,
+    "no_earnings_within": int, "max_pe": (int, float),
+}
+
+
+def load_screens(paths=None) -> dict[str, dict]:
+    """Named screens from TOML files, each a table like:
+
+        [quality-value]
+        description = "Cash-rich, cheap, beating the market"
+        where = ["fcf_yield>=5", "pe<20"]
+        sort_by = "fcf_yield:desc"
+        top = 25
+
+    Files that don't exist are skipped; a screen in a later file replaces
+    one of the same name in an earlier file."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:                       # Python < 3.11
+        import tomli as tomllib
+    if paths is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        paths = [os.path.join(here, f) for f in SCREEN_FILES]
+    screens = {}
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path, "rb") as f:
+            try:
+                data = tomllib.load(f)
+            except tomllib.TOMLDecodeError as e:
+                raise ValueError(f"{os.path.basename(path)}: {e}")
+        for name, sc in data.items():
+            if not isinstance(sc, dict):
+                raise ValueError(f"{os.path.basename(path)}: [{name}] must be a table")
+            for key, val in sc.items():
+                want = SCREEN_KEYS.get(key)
+                if want is None:
+                    raise ValueError(f"{os.path.basename(path)} [{name}]: unknown setting "
+                                     f"{key!r} (allowed: {', '.join(SCREEN_KEYS)})")
+                if not isinstance(val, want) or isinstance(val, bool):
+                    raise ValueError(f"{os.path.basename(path)} [{name}]: {key} has the wrong type")
+            screens[name] = {**sc, "_source": os.path.basename(path)}
+    return screens
+
+
+def apply_screen(args, screen: dict) -> None:
+    """Merge a saved screen into parsed CLI args. List settings (where,
+    sector, exclude_sector) are combined with any given on the command
+    line; single settings apply only where the command line left them unset."""
+    for key in ("where", "sector", "exclude_sector"):
+        setattr(args, key, list(screen.get(key, [])) + list(getattr(args, key) or []))
+    for key in ("signal", "asset_type", "sort_by", "top", "no_earnings_within", "max_pe"):
+        if getattr(args, key) is None and key in screen:
+            setattr(args, key, screen[key])
+
+
+def list_screens_text(screens: dict) -> str:
+    if not screens:
+        return "No saved screens found (looked for " + ", ".join(SCREEN_FILES) + ")."
+    lines = ["Saved screens (run one with --screen NAME):", ""]
+    for name, sc in screens.items():
+        lines.append(f"  {name}  [{sc['_source']}]")
+        if sc.get("description"):
+            lines.append(f"      {sc['description']}")
+        parts = list(sc.get("where", []))
+        if sc.get("sector"):
+            parts.append("sector in (" + ", ".join(sc["sector"]) + ")")
+        if sc.get("exclude_sector"):
+            parts.append("sector not in (" + ", ".join(sc["exclude_sector"]) + ")")
+        if sc.get("no_earnings_within") is not None:
+            parts.append(f"no earnings within {sc['no_earnings_within']} days")
+        for key in ("signal", "asset_type", "sort_by", "top", "max_pe"):
+            if key in sc:
+                parts.append(f"{key}={sc[key]}")
+        if parts:
+            lines.append("      " + "; ".join(str(p) for p in parts))
+        lines.append("")
+    return "\n".join(lines).rstrip()
 
 
 def describe_filters(conditions, sort, top) -> str:
@@ -1998,21 +2119,31 @@ when STOCK_SCREENER_ASCII is set.
                              "comment to the end of the line "
                              "(overrides --index; --tickers wins over this)")
     parser.add_argument("--signal",
-                        choices=["flagged", "buy", "sell", "hold", "all",
-                                 "undervalued", "oversold", "overvalued", "overbought",
-                                 "overextended"],
+                        choices=SIGNAL_CHOICES,
                         default=None,
                         help="Which signals to include (default: flagged = any non-neutral, "
                              "or all when --where is used; "
                              "buy = undervalued/oversold; sell = overvalued/overbought/overextended; "
                              "hold = no signal either way)")
-    parser.add_argument("--asset-type", choices=["all", "stock", "etf"], default="all",
+    parser.add_argument("--asset-type", choices=["all", "stock", "etf"], default=None,
                         help="Restrict to equities only or ETFs only (default: all). "
                              "Type is auto-detected per ticker.")
     parser.add_argument("--where", action="append", default=[], metavar="COND",
                         help='Keep only tickers matching COND, e.g. "pe<20", "market_cap>=2B", '
                              '"sector=Energy", "tag=oversold". Repeat to require several. '
                              "See --list-fields")
+    parser.add_argument("--sector", action="append", default=[], metavar="NAME",
+                        help='Keep only this sector, e.g. "Technology"; repeat for any of several')
+    parser.add_argument("--exclude-sector", action="append", default=[], metavar="NAME",
+                        help='Drop this sector, e.g. "Financial Services"; repeatable')
+    parser.add_argument("--no-earnings-within", type=int, metavar="DAYS",
+                        help="Drop tickers reporting earnings in the next DAYS days "
+                             "(keeps ETFs and tickers with no known date)")
+    parser.add_argument("--screen", metavar="NAME",
+                        help="Run a saved screen from screens.toml / my-screens.toml; other "
+                             "options add to it (--where, --sector) or override it")
+    parser.add_argument("--list-screens", action="store_true",
+                        help="Show the saved screens and exit")
     parser.add_argument("--sort-by", metavar="FIELD[:desc]",
                         help="Sort matches by a field, ascending unless :desc (e.g. fcf_yield:desc)")
     parser.add_argument("--top", type=int, metavar="N", help="Keep only the first N matches")
@@ -2061,12 +2192,39 @@ when STOCK_SCREENER_ASCII is set.
         print(list_fields_text())
         return
 
+    if args.list_screens or args.screen:
+        try:
+            screens = load_screens()
+        except (ValueError, ModuleNotFoundError) as e:
+            parser.error(f"can't read saved screens: {e}")
+        if args.list_screens:
+            print(list_screens_text(screens))
+            return
+        if args.screen not in screens:
+            parser.error(f"no saved screen {args.screen!r}; available: "
+                         + (", ".join(screens) or "none") + " (see --list-screens)")
+        apply_screen(args, screens[args.screen])
+        if args.signal is not None and args.signal not in SIGNAL_CHOICES:
+            parser.error(f"screen {args.screen!r}: signal must be one of {', '.join(SIGNAL_CHOICES)}")
+        if args.asset_type is not None and args.asset_type not in ("all", "stock", "etf"):
+            parser.error(f"screen {args.screen!r}: asset_type must be all, stock or etf")
+    if args.asset_type is None:
+        args.asset_type = "all"
+
     # Validate filters up front, before any downloading
     try:
         conditions = [Condition(c) for c in args.where]
         sort = parse_sort(args.sort_by) if args.sort_by else None
     except ValueError as e:
         parser.error(str(e))
+    if args.sector:
+        conditions.append(OneOf("sector", args.sector))
+    if args.exclude_sector:
+        conditions.append(OneOf("sector", args.exclude_sector, exclude=True))
+    if args.no_earnings_within is not None:
+        if args.no_earnings_within < 0:
+            parser.error("--no-earnings-within must be 0 or more")
+        conditions.append(NoEarningsWithin(args.no_earnings_within))
     if args.top is not None and args.top < 1:
         parser.error("--top must be at least 1")
     if args.cache_only and args.no_cache:
@@ -2074,6 +2232,8 @@ when STOCK_SCREENER_ASCII is set.
     if args.signal is None:
         args.signal = "all" if conditions else "flagged"
     criteria = describe_filters(conditions, sort, args.top)
+    if args.screen:
+        criteria = f"screen {args.screen}" + (f": {criteria}" if criteria else "")
 
     if args.list_indices:
         print("\nAvailable indices:\n")

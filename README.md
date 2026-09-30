@@ -287,6 +287,9 @@ python3 stock_screener.py --tickers-file ticker-lists/sp500.txt \
 | `--save-tickers FILE` | Save matches as a `TICKER # name` watch list for `--tickers-file` |
 | `--csv FILE` | Save every field for each match, for a spreadsheet |
 | `--quiet` | No per-ticker progress lines |
+| `--sector NAME` | Keep only this sector; repeat for *any of* several (`--sector Energy --sector Utilities`) |
+| `--exclude-sector NAME` | Drop this sector; repeatable. ETFs (no sector) are kept |
+| `--no-earnings-within N` | Drop tickers reporting in the next N days. Unlike `--where "earnings_days>N"`, keeps ETFs and tickers with no announced date |
 
 With `--where`, `--signal` defaults to `all`, so only your conditions apply;
 add e.g. `--signal buy` to combine them with the built-in signals. A ticker
@@ -299,6 +302,36 @@ filter out illiquid micro-caps in `us-all`), `forward_pe`, `ev_ebitda`,
 `roe`. High FCF yields are common among insurers (their cash flow includes
 premiums they'll later pay out); add `--where "sector!=Financial Services"`
 to leave them out.
+
+### Saved screens
+
+Name a combination of settings once and run it with `--screen NAME`:
+
+```bash
+python3 stock_screener.py --list-screens
+python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --screen quality-value
+python3 stock_screener.py --tickers-file my-stocks.txt --screen trim-candidates
+```
+
+[`screens.toml`](screens.toml) ships with examples — `quality-value`,
+`quality-dip`, `oversold-accumulation`, `momentum-leaders`,
+`dividend-income`, `etf-discounts` and `trim-candidates` — and documents
+every setting. Put your own in **`my-screens.toml`** (gitignored), same
+format; a screen there replaces a bundled one with the same name:
+
+```toml
+[my-cheap-tech]
+description = "Cheap, profitable tech"
+where = ["pe<18", "margin>=15", "market_cap>=5B"]
+sector = ["Technology"]
+no_earnings_within = 7
+sort_by = "pe"
+top = 20
+```
+
+Command-line options **add to** a screen (`--where`, `--sector`,
+`--exclude-sector`) or **override** it (`--top`, `--sort-by`, `--signal`,
+…), so `--screen quality-value --top 5 --sector Energy` works as expected.
 
 ### Filter the whole market in seconds: `--cache-only`
 

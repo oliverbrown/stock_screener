@@ -4,3 +4,4 @@ pandas>=2.0
 lxml               # used by pandas.read_html to load index lists from Wikipedia
 openpyxl           # used by pandas.read_excel to load Dow 30 members (DIA holdings)
 certifi            # CA certificates for HTTPS (python.org macOS installs lack them)
+tomli; python_version < "3.11"   # reads screens.toml (built in as tomllib from 3.11)

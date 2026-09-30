@@ -1,0 +1,109 @@
+# Saved screens for stock_screener.py.
+#
+#   python3 stock_screener.py --list-screens
+#   python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --screen quality-value
+#   python3 stock_screener.py --tickers-file ticker-lists/us-all.txt --cache-only --screen quality-dip
+#
+# Put your own screens in my-screens.toml (gitignored), using the same
+# format; a screen there replaces one here with the same name.
+#
+# Settings (all optional):
+#   description         shown by --list-screens
+#   where               list of conditions, as for --where (see --list-fields)
+#   sector              keep only these sectors (any of them)
+#   exclude_sector      drop these sectors
+#   no_earnings_within  drop tickers reporting in the next N days
+#   signal              flagged | buy | sell | hold | all | a tag name
+#                       (default: all when "where" is set)
+#   asset_type          all | stock | etf
+#   sort_by             field, or "field:desc"
+#   top                 keep the first N matches
+#   max_pe              suppress "undervalued" above this P/E
+#
+# Command-line options add to a screen (--where, --sector, --exclude-sector)
+# or override it (everything else).
+#
+# These are starting points built from simple rules of thumb, not advice.
+
+[quality-value]
+description = "Cheap on earnings and cash flow, modest debt, beating the S&P 500"
+where = [
+    "market_cap>=2B",
+    "dollar_volume>=10M",
+    "fcf_yield>=5",
+    "pe<20",
+    "debt_equity<100",
+    "rel_1y>0",
+]
+# Insurers' cash flow includes premiums they'll pay out later, which
+# inflates their FCF yield
+exclude_sector = ["Financial Services"]
+no_earnings_within = 7
+sort_by = "fcf_yield:desc"
+top = 25
+
+[quality-dip]
+description = "Profitable, cash-generating market leaders on a short-term pullback"
+where = [
+    "market_cap>=2B",
+    "dollar_volume>=10M",
+    "margin>=10",
+    "fcf_yield>=3",
+    "rel_1y>=10",
+    "rsi<40",
+]
+no_earnings_within = 7
+sort_by = "rsi"
+top = 25
+
+[oversold-accumulation]
+description = "Deeply oversold, but with buyers stepping in (positive money flow)"
+where = [
+    "market_cap>=1B",
+    "dollar_volume>=5M",
+    "rsi<32",
+    "cmf>=0.05",
+]
+sort_by = "rsi"
+top = 25
+
+[momentum-leaders]
+description = "Strong relative strength near 52-week highs, still in an uptrend"
+where = [
+    "market_cap>=2B",
+    "dollar_volume>=10M",
+    "rel_1y>=20",
+    "rel_3m>0",
+    "pct_off_high>=-5",
+    "pct_vs_200>0",
+]
+sort_by = "rel_1y:desc"
+top = 25
+
+[dividend-income]
+description = "Solid dividend yield covered by free cash flow, with moderate debt"
+where = [
+    "market_cap>=5B",
+    "div_yield>=3",
+    "fcf_yield>=5",
+    "debt_equity<150",
+    "margin>0",
+]
+exclude_sector = ["Financial Services", "Real Estate"]
+sort_by = "div_yield:desc"
+top = 25
+
+[etf-discounts]
+description = "ETFs trading below NAV that are cheap to own and large enough"
+asset_type = "etf"
+where = [
+    "fund_assets>=500M",
+    "nav_premium<=-0.5",
+    "expense<=0.4",
+]
+sort_by = "nav_premium"
+top = 25
+
+[trim-candidates]
+description = "Run on your holdings: overvalued and stretched (sell signal)"
+signal = "sell"
