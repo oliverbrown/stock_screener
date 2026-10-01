@@ -170,3 +170,26 @@ def test_prune_fundamentals(fund_cache, monkeypatch):
         os.utime(p, (t, t))
     assert ss.prune_fundamentals(8) == 1
     assert [p.name for p in fund_cache.iterdir()] == ["NEW.json"]
+
+
+# ── Negative P/E (losses) ─────────────────────────────────────────────────────
+@pytest.mark.parametrize("trailing, forward, expected", [
+    (25.0,  20.0,  25.0),      # trailing wins
+    (None,  20.0,  20.0),      # forward fallback
+    (None,  -15.8, None),      # expected losses (ABAT): no P/E, not "cheap"
+    (-0.8,  None,  None),      # trailing losses
+    (-5.0,  12.0,  12.0),      # trailing negative, forward positive
+    (0.0,   None,  None),
+])
+def test_pe_ignores_losses(fund_cache, clock, monkeypatch, trailing, forward, expected):
+    q = stock_quote(trailingPE=trailing, forwardPE=forward)
+    FakeYahoo(monkeypatch, {"X": q}, {"X": SUMMARY})
+    assert fetch("X")["pe"] == expected
+
+
+def test_loss_maker_is_not_undervalued(fund_cache, clock, monkeypatch):
+    from test_classify import make_stock
+    FakeYahoo(monkeypatch, {"ABAT": stock_quote(trailingPE=None, forwardPE=-15.8)}, {"ABAT": SUMMARY})
+    pe = fetch("ABAT")["pe"]
+    assert "undervalued" not in ss.classify_signal(make_stock(pe=pe, pb=5.0), None)[1]
+    assert not ss.Condition("pe<20").matches({"pe": pe})        # screens skip it too

@@ -735,7 +735,7 @@ class TickerCache:
 
     # Bump when fetch_stock's output fields change, so older entries (which
     # would be missing the new fields) are ignored instead of crashing.
-    VERSION = 8
+    VERSION = 9
 
     def __init__(self, cache_dir: str, max_age_min: float):
         self.dir     = cache_dir
@@ -1095,7 +1095,11 @@ def _fetch_stock_once(ticker: str) -> dict:
         raw_pe = info.get("trailingPE")
         pe = raw_pe if (raw_pe and 0 < raw_pe < 200) else None
     else:
-        pe = info.get("trailingPE") or info.get("forwardPE")
+        # A P/E of zero or below means losses (expected losses, for the
+        # forward fallback): there's no meaningful P/E, rather than a
+        # "cheap" one, so it must not read as below the sector average.
+        pe = next((v for v in (info.get("trailingPE"), info.get("forwardPE"))
+                   if isinstance(v, (int, float)) and v > 0), None)
     pb, pb_note = sanitize_pb(info)
     fcf_y, fcf_note = fcf_yield(info)
 
