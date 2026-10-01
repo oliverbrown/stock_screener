@@ -2156,6 +2156,10 @@ when STOCK_SCREENER_ASCII is set.
                         help="Never download: screen only tickers already in the cache (any age "
                              "up to a day, or --cache-minutes if longer). Pair with a morning run "
                              "that fills the cache to re-filter the whole market in seconds")
+    parser.add_argument("--prefetch", action="store_true",
+                        help="Only download the tickers into the cache (skipping any already "
+                             "cached within --cache-minutes); no report. Run once before several "
+                             "--cache-only screens over the same tickers")
     parser.add_argument("--quiet", action="store_true",
                         help="Don't print a progress line per ticker (summary and report still print)")
     parser.add_argument("--max-pe",  type=float, default=None, metavar="N",
@@ -2227,6 +2231,12 @@ when STOCK_SCREENER_ASCII is set.
         conditions.append(NoEarningsWithin(args.no_earnings_within))
     if args.top is not None and args.top < 1:
         parser.error("--top must be at least 1")
+    if args.prefetch and (args.cache_only or args.no_cache):
+        parser.error("--prefetch fills the cache; it can't be combined with --cache-only or --no-cache")
+    if args.prefetch and (args.where or args.screen or args.output or args.save_tickers or args.csv):
+        parser.error("--prefetch only downloads; run filters and reports in a separate --cache-only run")
+    if args.prefetch:
+        args.signal = "all"
     if args.cache_only and args.no_cache:
         parser.error("--cache-only needs the cache; drop --no-cache")
     if args.signal is None:
@@ -2312,6 +2322,9 @@ when STOCK_SCREENER_ASCII is set.
             workers       = max(1, args.workers),
             progress      = not args.quiet,
         )
+        if args.prefetch:
+            print(f"\n  Prefetch done: {screened} ticker(s) cached in {os.path.abspath(args.cache_dir)}\n")
+            return
         if criteria:
             before = len(stocks)
             stocks = apply_filters(stocks, conditions, sort, args.top)

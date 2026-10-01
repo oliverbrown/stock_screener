@@ -351,6 +351,23 @@ python3 stock_screener.py --tickers-file ticker-lists/us-all.txt --cache-only --
 if longer), never contacts Yahoo, and skips tickers that aren't cached. The
 `Data:` line shows how old the oldest data is.
 
+For a script that runs several screens over overlapping lists, download
+everything once with `--prefetch` (fills the cache, no report), then run
+each screen with `--cache-only`:
+
+```bash
+cat my-stocks.txt ticker-lists/sp500.txt ticker-lists/nasdaq100.txt > universe.txt
+python3 stock_screener.py --tickers-file universe.txt --prefetch --workers 4 --quiet
+python3 stock_screener.py --tickers-file my-stocks.txt --cache-only --signal all
+python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --cache-only --screen quality-value
+```
+
+Each ticker is downloaded once however many lists it's in, and every report
+uses the same snapshot. A re-run within `--cache-minutes` skips the
+downloads. About 4 workers is the sweet spot: Yahoo caps sustained
+downloads at roughly 2 tickers a second, and more workers mostly trigger
+rate-limit pauses.
+
 ## Output
 
 ```bash
