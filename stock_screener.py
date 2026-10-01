@@ -845,9 +845,27 @@ def fetch_stock(ticker: str) -> tuple[dict | None, str | None]:
     return None, "unreachable"
 
 
+_NOT_A_NUMBER = {"infinity", "-infinity", "inf", "-inf", "nan"}
+
+
+def clean_info(info: dict) -> dict:
+    """Yahoo occasionally reports a value as the text "Infinity" or "NaN"
+    (e.g. forwardPE when expected earnings are zero), or as an infinite
+    float. Treat those as missing, like any absent field, so a comparison
+    such as forward_pe > 0 can't crash on them."""
+    out = {}
+    for k, v in info.items():
+        if isinstance(v, str) and v.strip().lower() in _NOT_A_NUMBER:
+            v = None
+        elif isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            v = None
+        out[k] = v
+    return out
+
+
 def _fetch_stock_once(ticker: str) -> dict:
     t    = yf.Ticker(ticker)
-    info = t.info
+    info = clean_info(t.info)
     price = info.get("currentPrice") or info.get("regularMarketPrice")
     if not price:
         raise SkipTicker("no price data (unknown, delisted, or mistyped ticker?)")
