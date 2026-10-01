@@ -459,10 +459,27 @@ log file. It auto-enables on a dumb or non-UTF-8 terminal, or when the
 
 ## Example runner
 
-[`run-screener.sh`](run-screener.sh) is a runnable example that drives the
-screener over indices and an inline watchlist. Copy it to
-`run-my-screener.sh` (or any `run-my-*.sh` name — all gitignored) and point it at your own `--tickers-file`
-lists.
+[`run-screener.sh`](run-screener.sh) is a runnable example of a daily run.
+As shipped it screens an inline watch list plus the Dow 30 and Nasdaq-100:
+
+```bash
+./run-screener.sh              # reports and watchlists/ in this folder
+./run-screener.sh screens      # ...or in ./screens/ (created if missing)
+```
+
+It downloads every ticker once (`--prefetch`), then runs each report and
+saved screen from the cache (`--cache-only`): your watch list (all signals,
+and trim candidates), buy candidates per index, and the saved screens, each
+of which also writes `watchlists/<screen>.txt`. Report names start with the
+run's `HH_MM`.
+
+Copy it to `run-my-screener.sh` (or any `run-my-*.sh` name — all gitignored)
+and edit the settings at the top: your tickers or `WATCHLIST_FILE`,
+`INDEXES`, `SCREENS`. From cron:
+
+```
+30 9 * * 1-5 cd /path/to/stock_screener && ./run-screener.sh screens >> screens/screener.log 2>&1
+```
 
 ## Tests
 
