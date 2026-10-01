@@ -748,6 +748,16 @@ class TickerCache:
     def _path(self, ticker: str) -> str:
         return os.path.join(self.dir, urllib.parse.quote(ticker, safe="") + ".json")
 
+    def has(self, ticker: str) -> bool:
+        """Whether get() would return a fresh entry (without counting it)."""
+        try:
+            with open(self._path(ticker), encoding="utf-8") as f:
+                entry = json.load(f)
+            return (entry.get("version") == self.VERSION
+                    and 0 <= time.time() - entry["fetched"] <= self.max_age)
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
     def get(self, ticker: str) -> dict | None:
         try:
             with open(self._path(ticker), encoding="utf-8") as f:
@@ -863,9 +873,193 @@ def clean_info(info: dict) -> dict:
     return out
 
 
+# ── Quote and fundamentals downloads ─────────────────────────────────────────
+# yfinance's Ticker.info costs 3 requests per ticker: quoteSummary (slow-moving
+# fundamentals), a quote (price, P/E, market cap, pre/post, earnings dates) and
+# a timeseries request just for the trailing PEG ratio. With the price history
+# that was 4 requests per ticker. Instead:
+#   - quotes are fetched up to QUOTE_BATCH tickers per request;
+#   - fundamentals + PEG are cached for FUNDAMENTALS_DAYS (stocks) or a day
+#     (funds, whose NAV only comes with the fundamentals and changes daily).
+# So on most days a stock costs ~1 request: its price history.
+try:
+    from yfinance.data import YfData
+except ImportError:                                   # yfinance internals moved
+    YfData = None
+
+_QUOTE_URL     = "https://query1.finance.yahoo.com/v7/finance/quote"
+_SUMMARY_URL   = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/"
+_PEG_URL       = "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/"
+_SUMMARY_MODULES = "financialData,quoteType,defaultKeyStatistics,assetProfile,summaryDetail"
+QUOTE_BATCH    = 100
+FUND_TYPES     = ("ETF", "MUTUALFUND")
+
+# Set by main(): how long stock fundamentals are reused (0 = always refetch),
+# and where they're cached (None = no fundamentals cache).
+FUNDAMENTALS_DAYS = 7
+FUND_CACHE_DIR: str | None = None
+
+# Quotes fetched in bulk by prefetch_quotes() for this run: ticker -> quote
+_QUOTES: dict[str, dict] = {}
+_QUOTES_LOCK = threading.Lock()
+
+
+def _yf_json(url: str, params: dict) -> dict:
+    """GET a Yahoo JSON endpoint through yfinance's session (cookies, crumb)."""
+    return YfData().get_raw_json(url, params=params)
+
+
+def _fetch_quote_batch(symbols: list[str]) -> dict[str, dict]:
+    """One request for up to QUOTE_BATCH tickers. Unknown tickers are simply
+    missing from the result."""
+    data = _yf_json(_QUOTE_URL, {"symbols": ",".join(symbols), "formatted": "false"})
+    rows = (data.get("quoteResponse") or {}).get("result") or []
+    return {r["symbol"]: r for r in rows if r.get("symbol")}
+
+
+def _fetch_summary(symbol: str) -> dict:
+    """quoteSummary's fundamentals modules, flattened the way yfinance's
+    .info does (module fields merged into one dict, None values dropped)."""
+    data = _yf_json(_SUMMARY_URL + symbol, {"modules": _SUMMARY_MODULES, "formatted": "false",
+                                            "corsDomain": "finance.yahoo.com", "symbol": symbol})
+    out = {}
+    for module in ((data.get("quoteSummary") or {}).get("result") or [{}])[0].values():
+        if isinstance(module, dict):
+            out.update({k: v for k, v in module.items() if v is not None})
+    return out
+
+
+def _fetch_trailing_peg(symbol: str) -> float | None:
+    """Yahoo's trailing PEG ratio (the most recent of the last six months)."""
+    now = int(time.time())
+    data = _yf_json(_PEG_URL + symbol, {"symbol": symbol, "type": "trailingPegRatio",
+                                        "period1": now - 183 * 86400, "period2": now})
+    for series in ((data.get("timeseries") or {}).get("result") or []):
+        points = series.get("trailingPegRatio") or []
+        if points:
+            return (points[-1].get("reportedValue") or {}).get("raw")
+    return None
+
+
+def prefetch_quotes(symbols: list[str], verbose: bool = False) -> None:
+    """Fetch quotes for many tickers in batches before screening them, so
+    each ticker's download needs no quote request of its own."""
+    todo = [s for s in dict.fromkeys(symbols) if s not in _QUOTES]
+    if not todo or YfData is None:
+        return
+    batches = [todo[i:i + QUOTE_BATCH] for i in range(0, len(todo), QUOTE_BATCH)]
+    for batch in batches:
+        for wait in (*RATE_LIMIT_BACKOFF, None):
+            _wait_for_cooldown()
+            try:
+                got = _fetch_quote_batch(batch)
+                with _QUOTES_LOCK:
+                    _QUOTES.update(got)
+                    # Yahoo leaves out tickers it doesn't know: remember that,
+                    # so they're skipped without asking again one by one
+                    for sym in batch:
+                        _QUOTES.setdefault(sym, {})
+                break
+            except Exception as e:
+                if not _is_rate_limit(e) or wait is None:
+                    break                             # those tickers fall back to one quote each
+                _start_cooldown(wait)
+    if verbose:
+        print(f"  Quotes: {len(todo)} ticker(s) in {len(batches)} request(s)\n")
+
+
+def _fundamentals_path(symbol: str) -> str:
+    return os.path.join(FUND_CACHE_DIR, urllib.parse.quote(symbol, safe="") + ".json")
+
+
+def get_fundamentals(symbol: str, quote: dict) -> tuple[dict, float | None, float | None]:
+    """(summary, trailing PEG, price when they were fetched), from the
+    fundamentals cache if fresh enough, else downloaded (and cached)."""
+    is_fund = (quote.get("quoteType") or "").upper() in FUND_TYPES
+    max_days = 1 if is_fund else FUNDAMENTALS_DAYS
+    if FUND_CACHE_DIR and max_days > 0:
+        try:
+            with open(_fundamentals_path(symbol), encoding="utf-8") as f:
+                entry = json.load(f)
+            if 0 <= time.time() - entry["fetched"] <= max_days * 86400:
+                return entry["summary"], entry.get("peg"), entry.get("price")
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    summary = _fetch_summary(symbol)
+    peg = None if is_fund else _fetch_trailing_peg(symbol)
+    price = quote.get("regularMarketPrice")
+    if FUND_CACHE_DIR:
+        os.makedirs(FUND_CACHE_DIR, exist_ok=True)
+        path = _fundamentals_path(symbol)
+        tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"fetched": time.time(), "price": price, "summary": summary, "peg": peg}, f)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return summary, peg, price
+
+
+def prune_fundamentals(older_than_days: float) -> int:
+    """Delete fundamentals cache entries older than this. Returns how many."""
+    if not FUND_CACHE_DIR:
+        return 0
+    cutoff, removed = time.time() - older_than_days * 86400, 0
+    for path in glob.glob(os.path.join(FUND_CACHE_DIR, "*.json")):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def merge_info(summary: dict, quote: dict, peg: float | None, price_then: float | None) -> dict:
+    """Combine cached fundamentals with a fresh quote into one info dict,
+    shaped like yfinance's .info (quote fields win, as they do there).
+    Fundamentals fields that depend on the price are rescaled to today's
+    price: PEG in proportion, EV/EBITDA via the change in market cap."""
+    info = {**summary, **quote}
+    if peg is not None:
+        info["trailingPegRatio"] = peg
+    price = quote.get("regularMarketPrice")
+    info["currentPrice"] = price                      # never the cached one
+    if quote.get("averageDailyVolume3Month"):
+        info["averageVolume"] = quote["averageDailyVolume3Month"]
+    if price and price_then:
+        r = price / price_then
+        for k in ("trailingPegRatio", "pegRatio"):
+            if isinstance(info.get(k), (int, float)):
+                info[k] = info[k] * r
+        ev, ev_x = summary.get("enterpriseValue"), summary.get("enterpriseToEbitda")
+        m0, m1 = summary.get("marketCap"), quote.get("marketCap")
+        if all(isinstance(v, (int, float)) and v for v in (ev, ev_x, m0, m1)):
+            ebitda = ev / ev_x
+            info["enterpriseValue"] = ev + (m1 - m0)
+            info["enterpriseToEbitda"] = info["enterpriseValue"] / ebitda
+    return info
+
+
+def get_info(ticker: str, t) -> dict:
+    """Everything the screener reads about a ticker: a fresh quote (from the
+    batch if prefetched) plus cached-or-fresh fundamentals. Falls back to
+    yfinance's own .info if its internals have changed."""
+    if YfData is None:
+        return clean_info(t.info)
+    quote = _QUOTES.get(ticker)                       # {} = known to be missing
+    if quote is None:
+        quote = _fetch_quote_batch([ticker]).get(ticker)
+    if not quote:
+        raise SkipTicker("no price data (unknown, delisted, or mistyped ticker?)")
+    summary, peg, price_then = get_fundamentals(ticker, quote)
+    return clean_info(merge_info(summary, quote, peg, price_then))
+
+
 def _fetch_stock_once(ticker: str) -> dict:
     t    = yf.Ticker(ticker)
-    info = clean_info(t.info)
+    info = get_info(ticker, t)
     price = info.get("currentPrice") or info.get("regularMarketPrice")
     if not price:
         raise SkipTicker("no price data (unknown, delisted, or mistyped ticker?)")
@@ -1626,6 +1820,11 @@ def run_screen(
     threads share a cooldown whenever Yahoo rate-limits a request.
     Returns (matched_stocks, total_analyzed), in the order given.
     """
+    # Batch-fetch quotes for every ticker that will actually be downloaded
+    if not CACHE_ONLY:
+        need = [t for t in [BENCHMARK, *tickers] if CACHE is None or not CACHE.has(t)]
+        prefetch_quotes(need, verbose=verbose)
+
     bench = benchmark_returns()
     if verbose:
         if bench and bench.get("1y") is not None:
@@ -2197,6 +2396,10 @@ when STOCK_SCREENER_ASCII is set.
                              "again (default: 30)")
     parser.add_argument("--no-cache", action="store_true",
                         help="Always download fresh data (same as --cache-minutes 0)")
+    parser.add_argument("--fundamentals-days", type=float, default=7, metavar="N",
+                        help="Reuse each stock's fundamentals (sector, margins, debt, cash flow, "
+                             "analyst targets, PEG) for N days; prices, P/E and market cap are "
+                             "always fresh. Funds refresh daily. 0 = always download (default: 7)")
     parser.add_argument("--workers", type=int, default=1, metavar="N",
                         help="Download N tickers in parallel (default: 1). 4-8 speeds up "
                              "big lists a lot; more mostly just triggers Yahoo rate limits")
@@ -2280,7 +2483,10 @@ when STOCK_SCREENER_ASCII is set.
     sys.stdout = _Tee(sys.__stdout__, log_file, ascii_only=ASCII_OUTPUT)
     sys.stderr = _Tee(sys.__stderr__, log_file, ascii_only=ASCII_OUTPUT)
 
-    global CACHE, CACHE_ONLY
+    global CACHE, CACHE_ONLY, FUNDAMENTALS_DAYS, FUND_CACHE_DIR
+    FUNDAMENTALS_DAYS = max(0.0, args.fundamentals_days)
+    FUND_CACHE_DIR = None if args.no_cache else os.path.join(args.cache_dir, "fundamentals")
+    prune_fundamentals(max(FUNDAMENTALS_DAYS, 1) + 1)
     cache_min = 0 if args.no_cache else args.cache_minutes
     # Entries are kept for a day, or longer if --cache-minutes asks for more
     keep_hours = max(24, cache_min / 60)

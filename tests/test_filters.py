@@ -161,25 +161,17 @@ def test_many_skips_are_grouped(monkeypatch, capsys):
 
 # ── New data fields from Yahoo's quote info ───────────────────────────────────
 def test_new_fields_from_info(monkeypatch):
-    import pandas as pd
-    info = {"currentPrice": 100.0, "quoteType": "EQUITY", "marketCap": 2_000_000_000,
-            "averageVolume": 50_000, "forwardPE": 18.44, "returnOnEquity": 0.1776,
-            "enterpriseToEbitda": 12.34, "financialCurrency": "USD", "currency": "USD"}
-    hist = pd.DataFrame({"Open": [100.0] * 60, "High": [101.0] * 60, "Low": [99.0] * 60,
-                         "Close": [100.0] * 60, "Volume": [50_000] * 60},
-                        index=pd.date_range("2026-06-01", periods=60, tz="America/New_York"))
-
-    class FakeTicker:
-        def __init__(self, t):
-            self.info = info
-        def history(self, **k):
-            return hist
-
-    monkeypatch.setattr(ss.yf, "Ticker", FakeTicker)
+    from fake_yahoo import FakeYahoo
+    quote = {"regularMarketPrice": 100.0, "quoteType": "EQUITY", "marketCap": 2_000_000_000,
+             "averageDailyVolume3Month": 50_000, "forwardPE": 18.44,
+             "financialCurrency": "USD", "currency": "USD"}
+    summary = {"returnOnEquity": 0.1776, "enterpriseToEbitda": 12.34}
+    FakeYahoo(monkeypatch, {"X": quote}, {"X": summary})
     d = ss._fetch_stock_once("X")
     assert (d["market_cap"], d["avg_volume"], d["dollar_volume"]) == (2_000_000_000, 50_000, 5_000_000)
     assert (d["forward_pe"], d["roe"], d["ev_ebitda"]) == (18.4, 17.8, 12.3)
-    info.update(financialCurrency="JPY")
+    quote.update(financialCurrency="JPY")
+    ss._QUOTES.clear()
     assert ss._fetch_stock_once("X")["ev_ebitda"] is None     # ADR currency mismatch
 
 
@@ -196,19 +188,10 @@ def test_clean_info():
 def test_infinity_forward_pe_does_not_crash(monkeypatch):
     """Regression: ANTA, BCHT, BDRX, CTSO were skipped with
     "TypeError: '>' not supported between instances of 'str' and 'int'"."""
-    import pandas as pd
-    info = {"currentPrice": 10.0, "quoteType": "EQUITY", "forwardPE": "Infinity",
-            "trailingPE": "Infinity", "enterpriseToEbitda": "Infinity"}
-    hist = pd.DataFrame({"Open": [10.0] * 60, "High": [10.5] * 60, "Low": [9.5] * 60,
-                         "Close": [10.0] * 60, "Volume": [1000] * 60},
-                        index=pd.date_range("2026-06-01", periods=60, tz="America/New_York"))
-
-    class FakeTicker:
-        def __init__(self, t):
-            self.info = info
-        def history(self, **k):
-            return hist
-
-    monkeypatch.setattr(ss.yf, "Ticker", FakeTicker)
+    from fake_yahoo import FakeYahoo, flat_history
+    FakeYahoo(monkeypatch,
+              {"ANTA": {"regularMarketPrice": 10.0, "quoteType": "EQUITY",
+                        "forwardPE": "Infinity", "trailingPE": "Infinity"}},
+              {"ANTA": {"enterpriseToEbitda": "Infinity"}}, history=flat_history(10.0))
     d = ss._fetch_stock_once("ANTA")
     assert d["forward_pe"] is None and d["pe"] is None and d["ev_ebitda"] is None

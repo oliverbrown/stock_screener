@@ -425,7 +425,26 @@ line.
 ```
 
 Only successful fetches are cached (never skipped tickers or errors), and
-entries older than a day are cleaned up automatically. Cached prices can be
+entries older than a day are cleaned up automatically.
+
+### Fundamentals cache
+
+Each ticker used to cost Yahoo **4 requests**: price history, a quote, the
+fundamentals, and the PEG ratio. Now:
+
+- **Quotes** (price, P/E, market cap, pre/after-hours, earnings dates) are
+  fetched **100 tickers per request**, always fresh.
+- **Fundamentals** (sector, margins, debt, free cash flow, analyst targets,
+  PEG…) are cached in `./cache/fundamentals/` for **7 days** for stocks and
+  1 day for funds (fund NAV only comes with the fundamentals and changes
+  daily). PEG and EV/EBITDA, which depend on the price, are rescaled to the
+  current price.
+
+On most days a stock now costs about **1 request** (its price history), so
+big runs are several times faster under Yahoo's rate limit. Change the
+window with `--fundamentals-days N` (`0` = always download them);
+`--no-cache` turns this cache off too. Tickers Yahoo doesn't know are
+dropped after the batched quote, without any further requests. Cached prices can be
 up to `--cache-minutes` old, so use `--no-cache` when you need the latest
 price during market hours.
 
