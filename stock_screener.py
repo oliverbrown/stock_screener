@@ -1789,7 +1789,10 @@ def save_ticker_list(stocks: list[dict], path: str, description: str = "") -> No
             f.write(f"# Criteria: {description}\n")
         f.write("\n")
         for s in stocks:
-            f.write(f"{s['ticker']:<{width}}# {s.get('name') or ''}\n")
+            # One line per ticker: a name containing a line break must not
+            # spill onto a new line, where it would be read back as tickers
+            name = " ".join(str(s.get("name") or "").split())
+            f.write(f"{s['ticker']:<{width}}# {name}\n")
 
 
 def save_csv(stocks: list[dict], path: str) -> None:
@@ -2083,8 +2086,14 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
         "neutral":     ("Neutral",      "#f5f5f3", "#6b6b67"),
         "hold":        ("Hold",         "#f5f5f3", "#6b6b67"),
     }
+    # Text that originates from Yahoo (or a ticker file) is untrusted: escape
+    # it so a name like "<script>…" shows as text instead of running.
+    text_fields = ("ticker", "name", "sector", "category", "quote_type",
+                   "thesis", "pb_note", "fcf_note", "rating")
     cards = ""
-    for s in stocks:
+    for stock in stocks:
+        s = {**stock, **{k: html_escape(str(stock[k])) for k in text_fields
+                         if stock.get(k) is not None}}
         label, bg, fg = badge.get(s["signal"], ("Neutral", "#f5f5f3", "#6b6b67"))
         chg_c   = "#16a34a" if s["change1d"] >= 0 else "#dc2626"
         chg_s   = f"{'+' if s['change1d'] >= 0 else ''}{s['change1d']}%"
@@ -2117,7 +2126,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
                         f'<div class="msub">1y{" &middot; " + others if others else ""}</div>')
         else:
             rel_html = "N/A"
-        yahoo_url = "https://finance.yahoo.com/quote/" + urllib.parse.quote(s["ticker"])
+        yahoo_url = "https://finance.yahoo.com/quote/" + urllib.parse.quote(stock["ticker"], safe="")
         tkr_html = (f'<a class="tkr" href="{yahoo_url}" target="_blank" '
                     f'rel="noopener">{s["ticker"]}</a>')
         ext_html = ""
@@ -2226,7 +2235,7 @@ def save_html_report(stocks: list[dict], screened: int, path: str,
           <div class="thesis">{s['thesis']}</div>
         </div>"""
 
-    subtitle = f"{index_label} &middot; " if index_label else ""
+    subtitle = f"{html_escape(index_label)} &middot; " if index_label else ""
     empty = "" if cards else \
         '<p style="color:#6b6b67;text-align:center;padding:2rem">No stocks matched the selected filters.</p>'
 

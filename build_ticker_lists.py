@@ -74,6 +74,7 @@ def write_list(path: str, title: str, source: str, rows: list[tuple[str, str]],
         f.write(f"# Use with: python3 stock_screener.py --tickers-file {path}\n")
         f.write("\n")
         for sym, name in rows:
+            name = " ".join(str(name).split())           # keep each entry on one line
             f.write(f"{sym:<{width}}# {name}\n" if name else f"{sym}\n")
 
 
