@@ -1,0 +1,15 @@
+# Dependabot version updates: keeps the GitHub Actions used by the CI
+# workflow current. (Security alerts and security-fix pull requests for the
+# Python packages are enabled separately in the repository settings.)
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"                 # workflows in .github/workflows
+    schedule:
+      interval: "monthly"
+    # One pull request for all action updates, rather than one each
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
