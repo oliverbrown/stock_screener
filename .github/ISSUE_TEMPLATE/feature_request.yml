@@ -1,0 +1,57 @@
+name: Feature request
+description: Suggest an indicator, filter, report change, data source or saved screen
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The goal or the problem, rather than the solution.
+      placeholder: "I want to leave out stocks that report earnings this week."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to see?
+      description: The option, output or behaviour you have in mind. An example command or report line helps.
+      placeholder: 'python3 stock_screener.py --index sp500 --no-earnings-within 7'
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Indicator or signal rule
+        - Filter / sorting / saved screen
+        - Report (terminal, HTML, CSV, watch list)
+        - Data download, cache or speed
+        - Ticker lists
+        - Runner scripts or documentation
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Where would the data come from?
+      description: >
+        If it needs data the screener doesn't have yet: is it in Yahoo's quote
+        data, or would it need extra requests per ticker? (Leave blank if unsure.)
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds or alternatives
+      description: Anything you do today instead, e.g. an existing `--where` filter that comes close.
+    validations:
+      required: false
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd be willing to open a pull request for this
+          required: false

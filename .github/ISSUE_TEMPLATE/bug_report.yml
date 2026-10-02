@@ -1,0 +1,76 @@
+name: Bug report
+description: Something crashed, a ticker was skipped wrongly, or a result looks wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please don't include personal watch lists or
+        anything you wouldn't want public — one or two example tickers is enough.
+        For a security problem, see the [security policy](https://github.com/oliverbrown/stock_screener/blob/main/SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+      placeholder: "ABAT is flagged undervalued, but its P/E is negative."
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact command you ran (and the saved screen, if you used one).
+      placeholder: python3 stock_screener.py --tickers ABAT --signal all
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or log
+      description: >
+        The relevant lines from the terminal or from the run log in ./logs/
+        (the error message, the "skipped: …" reason, or the ticker's report).
+      render: text
+    validations:
+      required: false
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of problem is it?
+      options:
+        - Crash or error message
+        - Ticker skipped or missing data
+        - Wrong value or signal
+        - Download / rate limiting / cache
+        - Ticker lists (build_ticker_lists.py)
+        - Reports or watch lists
+        - Something else
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `git rev-parse --short HEAD` (or the date you downloaded it).
+      placeholder: 8ec0bef
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version (`python3 --version`) and yfinance version (`pip show yfinance`).
+      placeholder: macOS 15, Python 3.11.5, yfinance 1.6.0
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I ran it again with `--no-cache` and the problem is still there (or that doesn't apply)
+          required: false
+        - label: I searched existing issues for the same problem
+          required: true

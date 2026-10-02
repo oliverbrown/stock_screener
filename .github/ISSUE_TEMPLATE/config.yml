@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea to discuss
+    url: https://github.com/oliverbrown/stock_screener/discussions
+    about: How do I…? questions, screen ideas and open-ended suggestions are welcome in Discussions.
+  - name: Security problem
+    url: https://github.com/oliverbrown/stock_screener/security/advisories/new
+    about: Please report vulnerabilities privately, not in a public issue.

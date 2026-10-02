@@ -494,6 +494,15 @@ python3 -m pytest
 
 CI runs it on Python 3.10–3.12 for every push and pull request.
 
+## Contributing
+
+Bug reports, ideas, new saved screens and pull requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for setup, how the offline tests work and
+the conventions the code relies on. Questions and screen ideas fit well in
+[Discussions](https://github.com/oliverbrown/stock_screener/discussions).
+Please follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report security
+problems privately as described in [SECURITY.md](SECURITY.md).
+
 ## Disclaimer
 
 This tool is provided for informational and educational purposes only. It
