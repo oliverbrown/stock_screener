@@ -11,6 +11,7 @@ files.zip
 logs/
 cache/
 watchlists/
+learned/
 ticker-lists/
 
 # personal ticker lists / watchlists

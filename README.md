@@ -368,6 +368,95 @@ downloads. About 4 workers is the sweet spot: Yahoo caps sustained
 downloads at roughly 2 tickers a second, and more workers mostly trigger
 rate-limit pauses.
 
+### Learn a screen from example tickers: `--learn`
+
+Have a handful of stocks you like and want more like them? `--learn` finds
+a few `--where` conditions that your tickers pass and most other stocks
+don't, as a **starter screen** to refine by hand. 5-10 tickers that are
+alike work best.
+
+```bash
+python3 stock_screener.py --tickers XOM CVX COP EOG DVN OXY --learn --cache-only
+```
+
+```
+  Learned screen                        yours   others left
+  (start)                                 6/6         5,933
+  sector in (Energy)                      6/6           239  (4.0%)
+  num_analysts>=22                        6/6            12  (0.2%)
+
+  Keeps 6 of your 6 tickers; 12 other ticker(s) match.
+
+  To tighten (each keeps all your matched tickers):
+    pct_vs_200>=7.1                others left      2
+    debt_equity<=36                others left      4
+    …
+
+  Look-alikes (most similar first):
+    ET      OVV     APA     FANG    SLB     KMI     BKR     WMB     HAL     RRC
+```
+
+How it works: thresholds come from your tickers' own values, rounded
+outwards to two significant figures so none of your tickers is lost. It then
+adds, one at a time, the condition that narrows the rest of the market the
+most. It stops after `--max-conditions` (default 4), when nothing narrows it
+much more, or before fewer than `--min-lookalikes` (default 10) others would
+be left. The **look-alikes** are the other stocks the screen matches, the
+most similar first.
+
+- **Universe:** your tickers are compared with `ticker-lists/us-stocks.txt`
+  (`us-etfs.txt` if they're all ETFs; change with `--universe FILE`). The
+  universe is always read **from the cache**, so fill it first, e.g. with
+  the `--prefetch` step above. Your own tickers are downloaded if needed,
+  unless you add `--cache-only`.
+- **Fields:** every numeric field and sector, except the ones describing
+  today's snapshot (`rsi`, `rvol`, `cmf`, `chg_5d`, `change1d`, `price`,
+  `earnings_days`), which would give a screen that stops matching your
+  tickers within days. Choose your own with `--learn-fields roe,margin,pe,…`.
+- **Coverage:** by default every one of your tickers must pass, so one odd
+  value rules a field out. `--min-coverage 80` lets the screen drop an
+  outlier for a tighter fit; the report says which ticker failed and why.
+- **`-v` / `--verbose`** adds a table of every field: your tickers' min /
+  median / max, the rest of the market's 10th / 50th / 90th percentile, and
+  the correlation between "is one of yours" and the field, as a
+  rank-biserial **r** from −1 to +1. +1 means all of your tickers are higher
+  than every other stock, −1 all lower, 0 no different. It works with a few
+  examples against thousands of others, where Pearson's r would sit near 0.
+
+Save it and refine it:
+
+```bash
+python3 stock_screener.py --tickers-file my-picks.txt --learn --cache-only --save-screen my-picks
+python3 stock_screener.py --tickers-file ticker-lists/us-stocks.txt --cache-only --screen my-picks
+```
+
+`--save-screen NAME` appends the screen to `my-screens.toml`. Each
+condition is annotated with how many tickers it keeps, and the
+**to tighten** suggestions are included as commented-out lines, ready to
+uncomment:
+
+```toml
+[my-picks]
+description = "Learned from my-picks.txt (7 tickers) on 2026-10-05"
+asset_type = "stock"
+where = [
+    "num_analysts>=32",           # yours 7/7, others left 58
+    "roe>=28",                    # yours 7/7, others left 19
+    "dollar_volume>=1.2B",        # yours 7/7, others left 10
+    # To tighten, uncomment (each keeps all your matched tickers):
+    # "rel_3m>=-9",               # others left 5
+    # "pb>=6.6",                  # others left 8
+]
+# Learned details: learned/my-picks.json
+```
+
+It also saves everything learned to `learned/NAME.json` (or anywhere with
+`--save-profile FILE.json`). This covers each condition's effect, every
+field's statistics, correlation and best single condition, the
+suggestions, the tickers that didn't match, and all the look-alikes. Use it
+to decide which conditions to loosen or swap in. `--save-tickers`, `--csv`
+and `--output` save the look-alikes (capped by `--top`).
+
 ## Output
 
 ```bash

@@ -38,6 +38,7 @@ The test suite is offline and takes a few seconds.
 | Path | What it is |
 |---|---|
 | `stock_screener.py` | The screener: downloads, indicators, signals, filters, reports, CLI |
+| `learn_screen.py` | `--learn`: learns a starter screen from example tickers (pure, no downloads) |
 | `ticker_sources.py` | Live index / exchange ticker sources |
 | `build_ticker_lists.py` | Writes reference ticker lists to `ticker-lists/` |
 | `screens.toml` | Bundled saved screens |

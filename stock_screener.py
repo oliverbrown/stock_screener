@@ -60,6 +60,8 @@ Usage:
     python3 stock_screener.py --list-fields            # fields --where can use
     python3 stock_screener.py --tickers-file ticker-lists/sp500.txt --screen quality-value
     python3 stock_screener.py --list-screens           # saved screens (screens.toml)
+    python3 stock_screener.py --tickers-file my-picks.txt --learn --save-screen my-picks
+                                                       # learn a starter screen from examples
 
 Requirements:
     pip install yfinance pandas
@@ -91,6 +93,7 @@ try:
     import yfinance as yf
     import pandas as pd
     import ticker_sources
+    import learn_screen
 except ImportError:
     print("Missing dependencies. Run:  pip install -r requirements.txt")
     sys.exit(1)
@@ -2306,6 +2309,159 @@ h1{{font-size:22px;font-weight:500;margin-bottom:4px}}
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
+# ── --learn: a starter screen from example tickers ───────────────────────────
+LEARN_DIR = "learned"
+
+
+def learn_fields(names: list[str] | None = None) -> dict[str, str]:
+    """Field -> unit ("text" for sector) to learn from: every numeric field
+    except today's-snapshot ones, unless `names` lists them explicitly."""
+    if names:
+        return {n: ("text" if n == "sector" else FIELDS[n][1]) for n in names}
+    out = {n: unit for n, (kind, unit, _, _) in FIELDS.items()
+           if kind == "num" and n not in learn_screen.SNAPSHOT_FIELDS
+           and n not in learn_screen.NOT_LEARNABLE}
+    out["sector"] = "text"
+    return out
+
+
+def parse_learn_fields(spec: str) -> list[str]:
+    names = [n.strip().lower() for n in spec.split(",") if n.strip()]
+    for n in names:
+        if n not in FIELDS or n in learn_screen.NOT_LEARNABLE \
+           or (FIELDS[n][0] != "num" and n != "sector"):
+            raise argparse.ArgumentTypeError(f"can't learn from {n!r}; "
+                             "use numeric fields or sector (see --list-fields)")
+    return names
+
+
+def _learn_row(stock: dict, fields) -> dict:
+    return {"ticker": stock["ticker"], **{f: FIELDS[f][3](stock) for f in fields}}
+
+
+def save_learned_screen(name: str, toml_text: str, path: str) -> None:
+    """Append a learned screen to my-screens.toml, after checking that it
+    parses on its own, so a bad write can never break the file."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:                       # Python < 3.11
+        import tomli as tomllib
+    tomllib.loads(toml_text)
+    sep = ""
+    if os.path.exists(path) and os.path.getsize(path):
+        with open(path, encoding="utf-8") as f:
+            sep = "\n" if f.read().endswith("\n") else "\n\n"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(sep + "\n" + toml_text if sep else toml_text)
+
+
+def run_learn(args, tickers: list[str], source: str, cache_keep_hours: float) -> None:
+    """Screen the example tickers, load the universe from the cache, learn
+    a screen and print / save it."""
+    global CACHE, CACHE_ONLY
+    examples, _ = run_screen(tickers, "all", None, "all", verbose=True,
+                             workers=max(1, args.workers), progress=not args.quiet)
+    if len(examples) < 2:
+        print("\n  Need at least 2 example tickers with data to learn from.\n")
+        return
+    if len(examples) < 5:
+        print(f"\n  Only {len(examples)} example tickers: the screen will be loose; "
+              "5-10 alike tickers work best.")
+    elif len(examples) > 15:
+        print(f"\n  {len(examples)} example tickers: if they aren't alike, the screen will be "
+              "loose; consider splitting them into groups.")
+
+    # Learn against the same kind of tickers as the examples
+    if all(not s["is_fund"] for s in examples):
+        asset_type, default_universe = "stock", "us-stocks"
+    elif all(s["quote_type"] == "ETF" for s in examples):
+        asset_type, default_universe = "etf", "us-etfs"
+    else:
+        asset_type, default_universe = "all", "us-all"
+        print("\n  Your tickers mix stocks and funds; a screen fits best when they're alike.")
+
+    universe_file = args.universe or os.path.join("ticker-lists", default_universe + ".txt")
+    if not os.path.exists(universe_file):
+        print(f"\n  Universe {universe_file} not found. Build it with:\n"
+              f"    python3 build_ticker_lists.py {default_universe}\n")
+        return
+    mine = {s["ticker"] for s in examples} | set(tickers)
+    universe = [t for t in load_tickers_file(universe_file) if t not in mine]
+
+    # The universe always comes from the cache: never thousands of downloads
+    CACHE_ONLY = True
+    CACHE = TickerCache(args.cache_dir, cache_keep_hours * 60)
+    print(f"\n  Loading the universe from the cache ({universe_file}, {len(universe):,} tickers)…")
+    others, _ = run_screen(universe, "all", None, asset_type, verbose=False, progress=False)
+    if len(others) < 100:
+        print(f"\n  Only {len(others)} universe ticker(s) are cached; fill the cache first:\n"
+              f"    python3 stock_screener.py --tickers-file {universe_file} --prefetch "
+              "--quiet --workers 4\n")
+        return
+
+    # Only fields your tickers have (no fund fields for stocks, and so on)
+    fields = {f: u for f, u in learn_fields(args.learn_fields).items()
+              if any(FIELDS[f][3](s) is not None for s in examples)}
+    res = learn_screen.learn([_learn_row(s, fields) for s in examples],
+                             [_learn_row(s, fields) for s in others], fields,
+                             max_conditions=args.max_conditions,
+                             min_coverage=args.min_coverage / 100,
+                             min_others=args.min_lookalikes)
+
+    oldest = max((s.get("cached_min") or 0 for s in others), default=0)
+    print(f"\n{'═' * 78}")
+    print(f"  LEARNED SCREEN  ·  from {len(examples)} ticker(s) ({source})")
+    print(f"  Universe: {universe_file}, {len(others):,} cached "
+          f"{'stocks' if asset_type == 'stock' else 'ETFs' if asset_type == 'etf' else 'tickers'}"
+          f" (data up to {oldest // 60}h old), yours excluded")
+    if asset_type != "all":
+        print(f"  asset_type = {asset_type}")
+    print(f"{'═' * 78}\n")
+    print(learn_screen.report_text(res, verbose=args.verbose, show=args.top or 25))
+
+    date_s = datetime.now().strftime("%Y-%m-%d")
+    description = f"Learned from {source} ({len(examples)} tickers) on {date_s}"
+    profile_path = args.save_profile
+    if args.save_screen and not profile_path:
+        profile_path = os.path.join(LEARN_DIR, args.save_screen + ".json")
+    toml_text = learn_screen.screen_toml(args.save_screen or "my-learned-screen", res,
+                                         description, asset_type, profile_path)
+    print("\n  As a saved screen" + ("" if args.save_screen else
+                                    " (save with --save-screen NAME)") + ":\n")
+    print("\n".join("    " + line for line in toml_text.rstrip().splitlines()))
+    print()
+
+    if profile_path:
+        meta = {"name": args.save_screen, "description": description,
+                "learned": datetime.now().isoformat(timespec="seconds"),
+                "source": source, "universe": universe_file, "asset_type": asset_type,
+                "max_conditions": args.max_conditions, "min_coverage": args.min_coverage,
+                "min_lookalikes": args.min_lookalikes,
+                "fields_used": list(fields)}
+        os.makedirs(os.path.dirname(os.path.abspath(profile_path)), exist_ok=True)
+        with open(profile_path, "w", encoding="utf-8") as f:
+            json.dump(learn_screen.profile(res, meta), f, indent=2)
+        print(f"  Learned details saved → {os.path.abspath(profile_path)}")
+    if args.save_screen and res.steps:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SCREEN_FILES[-1])
+        save_learned_screen(args.save_screen, toml_text, path)
+        print(f"  Screen saved → {path}  (run it with --screen {args.save_screen})")
+
+    by_ticker = {s["ticker"]: s for s in others}
+    lookalikes = [by_ticker[t] for t in res.lookalikes][:args.top or None]
+    criteria = "look-alikes of " + source + ": " + ", ".join(c.text for c in res.conditions)
+    if args.output:
+        save_html_report(lookalikes, len(others), args.output, "", criteria)
+        print(f"  HTML report saved → {os.path.abspath(args.output)}  (look-alikes)")
+    if args.save_tickers:
+        save_ticker_list(lookalikes, args.save_tickers, criteria)
+        print(f"  Watch list saved → {os.path.abspath(args.save_tickers)}  ({len(lookalikes)} look-alikes)")
+    if args.csv:
+        save_csv(lookalikes, args.csv)
+        print(f"  CSV saved        → {os.path.abspath(args.csv)}  (look-alikes)")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Stock screener — buy-side (undervalued / oversold) and "
@@ -2380,6 +2536,34 @@ when STOCK_SCREENER_ASCII is set.
     parser.add_argument("--save-tickers", metavar="FILE",
                         help="Save matches as a TICKER # name watch list for --tickers-file")
     parser.add_argument("--csv", metavar="FILE", help="Save every field for each match as CSV")
+    parser.add_argument("--learn", action="store_true",
+                        help="Learn a starter screen from the given tickers (--tickers / "
+                             "--tickers-file; 5-10 alike tickers work best): conditions they "
+                             "pass and most of --universe doesn't. The universe is read from "
+                             "the cache only")
+    parser.add_argument("--universe", metavar="FILE",
+                        help="With --learn: tickers to compare against (default: "
+                             "ticker-lists/us-stocks.txt, or us-etfs.txt for ETFs)")
+    parser.add_argument("--max-conditions", type=int, default=4, metavar="N",
+                        help="With --learn: at most N conditions (default: 4)")
+    parser.add_argument("--min-coverage", type=float, default=100, metavar="PCT",
+                        help="With --learn: the screen must keep at least PCT%% of your "
+                             "tickers (default: 100; lower lets it drop an outlier)")
+    parser.add_argument("--min-lookalikes", type=int, default=learn_screen.MIN_OTHERS, metavar="N",
+                        help="With --learn: stop adding conditions before fewer than N other "
+                             f"tickers would match (default: {learn_screen.MIN_OTHERS})")
+    parser.add_argument("--learn-fields", type=parse_learn_fields, metavar="F1,F2,…",
+                        help="With --learn: only these fields (default: every numeric field "
+                             "and sector, except snapshot ones like rsi, rvol, cmf, chg_5d)")
+    parser.add_argument("--save-screen", metavar="NAME",
+                        help="With --learn: append the screen to my-screens.toml as NAME, and "
+                             "save what was learned to learned/NAME.json")
+    parser.add_argument("--save-profile", metavar="FILE.json",
+                        help="With --learn: save what was learned (field statistics, "
+                             "correlations, other fitting conditions, look-alikes) as JSON")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="With --learn: also show each field's statistics and its "
+                             "correlation with your tickers")
     parser.add_argument("--list-fields", action="store_true",
                         help="Show the fields --where / --sort-by / --csv can use, and exit")
     parser.add_argument("--cache-only", action="store_true",
@@ -2429,6 +2613,38 @@ when STOCK_SCREENER_ASCII is set.
     if args.list_fields:
         print(list_fields_text())
         return
+
+    if args.learn:
+        clash = [opt for opt, val in (("--where", args.where), ("--screen", args.screen),
+                 ("--sector", args.sector), ("--exclude-sector", args.exclude_sector),
+                 ("--no-earnings-within", args.no_earnings_within is not None),
+                 ("--signal", args.signal), ("--asset-type", args.asset_type),
+                 ("--max-pe", args.max_pe), ("--sort-by", args.sort_by),
+                 ("--prefetch", args.prefetch), ("--no-cache", args.no_cache)) if val]
+        if clash:
+            parser.error("--learn can't be combined with " + ", ".join(clash))
+        if not (args.tickers or args.tickers_file):
+            parser.error("--learn needs your example tickers: --tickers or --tickers-file")
+        if args.max_conditions < 1:
+            parser.error("--max-conditions must be at least 1")
+        if not 0 < args.min_coverage <= 100:
+            parser.error("--min-coverage must be between 0 and 100")
+        if args.min_lookalikes < 0:
+            parser.error("--min-lookalikes must be 0 or more")
+        if args.save_screen:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", args.save_screen):
+                parser.error("--save-screen: use letters, digits, - and _ only")
+            try:
+                existing = load_screens()
+            except (ValueError, ModuleNotFoundError) as e:
+                parser.error(f"can't read saved screens: {e}")
+            if args.save_screen in existing:
+                parser.error(f"a screen named {args.save_screen!r} already exists in "
+                             f"{existing[args.save_screen]['_source']}; pick another name")
+    elif (args.universe or args.save_screen or args.save_profile or args.learn_fields
+          or args.verbose):
+        parser.error("--universe, --learn-fields, --save-screen, --save-profile and "
+                     "--verbose only work with --learn")
 
     if args.list_screens or args.screen:
         try:
@@ -2528,6 +2744,14 @@ when STOCK_SCREENER_ASCII is set.
             tickers = load_index(args.index)
         else:
             tickers = DEFAULT_TICKERS
+
+        if args.learn:
+            source = (os.path.basename(args.tickers_file) if args.tickers_file and not args.tickers
+                      else " ".join(tickers[:6]) + (" …" if len(tickers) > 6 else ""))
+            print(f"\nLearning a screen from {len(tickers)} ticker(s)  ·  "
+                  f"run log {os.path.abspath(log_path)}\n")
+            run_learn(args, tickers, source, keep_hours)
+            return
 
         out_path = resolve_output_path(args.output, args.index)
 
