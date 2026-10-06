@@ -1,0 +1,17 @@
+# Big pharma — 13 tickers
+# The largest US- and Europe-based drug makers.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/big-pharma.txt
+
+LLY  # Eli Lilly and Company
+JNJ  # Johnson & Johnson
+ABBV # AbbVie Inc.
+MRK  # Merck & Company, Inc.
+PFE  # Pfizer, Inc.
+AMGN # Amgen Inc.
+BMY  # Bristol-Myers Squibb Company
+GILD # Gilead Sciences, Inc.
+NVO  # Novo Nordisk A/S
+AZN  # AstraZeneca PLC
+NVS  # Novartis AG
+SNY  # Sanofi
+GSK  # GSK plc

@@ -1,0 +1,21 @@
+# AI leaders — 17 tickers
+# Chips, cloud, infrastructure and software most tied to AI spending.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/ai.txt
+
+NVDA  # NVIDIA Corporation
+MSFT  # Microsoft Corporation
+GOOGL # Alphabet Inc.
+META  # Meta Platforms, Inc.
+AMZN  # Amazon.com, Inc.
+AVGO  # Broadcom Inc.
+AMD   # Advanced Micro Devices, Inc.
+TSM   # Taiwan Semiconductor Manufacturing Company Ltd.
+ORCL  # Oracle Corporation
+PLTR  # Palantir Technologies Inc.
+ARM   # Arm Holdings plc
+SMCI  # Super Micro Computer, Inc.
+ANET  # Arista Networks, Inc.
+VRT   # Vertiv Holdings, LLC
+DELL  # Dell Technologies Inc.
+CRWV  # CoreWeave, Inc.
+SNOW  # Snowflake Inc.

@@ -1,6 +1,7 @@
 """Offline tests for ticker-list files: the "TICKER # name" format, symbol
 conversion, list writing, iShares CSV parsing and --index fallback."""
 
+import os
 import pytest
 
 import build_ticker_lists as btl
@@ -177,3 +178,17 @@ def test_symdir_block_page_is_a_clear_error(monkeypatch):
     monkeypatch.setattr(ts, "fetch_url", lambda url: BLOCK_PAGE)
     with pytest.raises(RuntimeError, match="bot protection"):
         ts._read_symdir("nasdaqlisted.txt")
+
+
+# ── Bundled theme lists (themes/*.txt) ────────────────────────────────────────
+def test_theme_lists_parse():
+    import glob
+    import re
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    files = sorted(glob.glob(os.path.join(here, "themes", "*.txt")))
+    assert len(files) >= 10
+    for path in files:
+        tickers = ss.load_tickers_file(path)
+        assert tickers and len(tickers) == len(set(tickers)), path
+        lines = [l for l in open(path, encoding="utf-8") if l.strip() and not l.startswith("#")]
+        assert all(re.fullmatch(r"[A-Z0-9.\-]+ +# \S.*\n", l) for l in lines), path

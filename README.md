@@ -252,6 +252,27 @@ written in Yahoo's form (`BRK-B`, preferreds as `ABR-PD`).
 Membership changes (index rebalances, IPOs, delistings), so re-run the
 script to refresh. The generated files are gitignored.
 
+### Theme lists
+
+[`themes/`](themes) holds small hand-picked lists for popular groups, in the
+same `TICKER # name` format. Unlike the lists above they aren't generated
+and don't follow an index, so edit them freely or add your own:
+
+| File | Contents |
+|---|---|
+| `faang`, `mamaa`, `mag7` | FAANG; Meta, Apple, Microsoft, Amazon, Alphabet; the Magnificent Seven |
+| `meme` | Retail-driven names (GME, AMC, …) — a matter of opinion |
+| `ai`, `semis`, `quantum` | AI leaders; large chip makers and equipment; pure-play quantum computing |
+| `nuclear`, `crypto`, `ev`, `china-tech` | Nuclear power and uranium; crypto stocks and spot ETFs; EV makers; Chinese internet ADRs |
+| `big-banks`, `big-pharma`, `oil-majors`, `defense` | Largest US banks; largest drug makers; oil majors; defense contractors |
+| `index-etfs`, `sector-etfs`, `bond-etfs` | Core index ETFs; the 11 Select Sector SPDRs; core bond ETFs |
+
+```bash
+python3 stock_screener.py --tickers-file themes/mag7.txt --signal all
+python3 stock_screener.py --tickers-file themes/sector-etfs.txt --signal all --sort-by rel_3m:desc
+python3 stock_screener.py --tickers-file themes/semis.txt --learn --cache-only   # find more like them
+```
+
 ## Filtering
 
 ```bash

@@ -1,0 +1,22 @@
+# Semiconductors — 18 tickers
+# Large chip designers, makers and equipment suppliers.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/semis.txt
+
+NVDA # NVIDIA Corporation
+AVGO # Broadcom Inc.
+AMD  # Advanced Micro Devices, Inc.
+TSM  # Taiwan Semiconductor Manufacturing Company Ltd.
+INTC # Intel Corporation
+QCOM # QUALCOMM Incorporated
+TXN  # Texas Instruments Incorporated
+MU   # Micron Technology, Inc.
+AMAT # Applied Materials, Inc.
+LRCX # Lam Research Corporation
+KLAC # KLA Corporation
+ASML # ASML Holding N.V.
+ARM  # Arm Holdings plc
+MRVL # Marvell Technology, Inc.
+ADI  # Analog Devices, Inc.
+NXPI # NXP Semiconductors N.V.
+ON   # ON Semiconductor Corporation
+MCHP # Microchip Technology Incorporated

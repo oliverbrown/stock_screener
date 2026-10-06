@@ -1,0 +1,13 @@
+# Crypto stocks — 9 tickers
+# Exchanges, bitcoin treasuries and miners, plus spot bitcoin / ether ETFs.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/crypto.txt
+
+COIN # Coinbase Global, Inc.
+MSTR # Strategy Inc
+HOOD # Robinhood Markets, Inc.
+CRCL # Circle Internet Group, Inc.
+MARA # MARA Holdings, Inc.
+RIOT # Riot Platforms, Inc.
+CLSK # CleanSpark, Inc.
+IBIT # iShares Bitcoin Trust ETF
+ETHA # iShares Ethereum Trust ETF

@@ -1,0 +1,16 @@
+# Meme stocks — 12 tickers
+# Retail / social-media driven names, 2021 onwards; a matter of opinion.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/meme.txt
+
+GME  # GameStop Corporation
+AMC  # AMC Entertainment Holdings, Inc.
+BB   # BlackBerry Limited
+KOSS # Koss Corporation
+NOK  # Nokia Corporation
+CLOV # Clover Health Investments, Corp.
+SNDL # SNDL Inc.
+OPEN # Opendoor Technologies Inc
+KSS  # Kohl's Corporation
+BYND # Beyond Meat, Inc.
+GPRO # GoPro, Inc.
+DJT  # Trump Media & Technology Group Corp.

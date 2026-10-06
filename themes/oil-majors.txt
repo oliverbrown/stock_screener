@@ -1,0 +1,11 @@
+# Oil majors — 7 tickers
+# Integrated oil and gas majors and the largest US producers.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/oil-majors.txt
+
+XOM  # Exxon Mobil Corporation
+CVX  # Chevron Corporation
+SHEL # Shell PLC
+BP   # BP p.l.c.
+TTE  # TotalEnergies SE
+COP  # ConocoPhillips
+EQNR # Equinor ASA

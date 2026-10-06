@@ -1,0 +1,9 @@
+# MAMAA — 5 tickers
+# FAANG updated: Meta, Apple, Microsoft, Amazon, Alphabet.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/mamaa.txt
+
+META  # Meta Platforms, Inc.
+AAPL  # Apple Inc.
+MSFT  # Microsoft Corporation
+AMZN  # Amazon.com, Inc.
+GOOGL # Alphabet Inc.

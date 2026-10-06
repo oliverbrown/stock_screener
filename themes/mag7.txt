@@ -1,0 +1,11 @@
+# Magnificent Seven — 7 tickers
+# The seven mega-cap tech stocks that led the market from 2023.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/mag7.txt
+
+AAPL  # Apple Inc.
+MSFT  # Microsoft Corporation
+GOOGL # Alphabet Inc.
+AMZN  # Amazon.com, Inc.
+NVDA  # NVIDIA Corporation
+META  # Meta Platforms, Inc.
+TSLA  # Tesla, Inc.

@@ -1,0 +1,9 @@
+# FAANG — 5 tickers
+# The original big-tech acronym (Facebook, Apple, Amazon, Netflix, Google).
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/faang.txt
+
+META  # Meta Platforms, Inc.
+AAPL  # Apple Inc.
+AMZN  # Amazon.com, Inc.
+NFLX  # Netflix, Inc.
+GOOGL # Alphabet Inc.

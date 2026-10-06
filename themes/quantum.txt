@@ -1,0 +1,8 @@
+# Quantum computing — 4 tickers
+# Pure-play quantum computing stocks (speculative).
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/quantum.txt
+
+IONQ # IonQ, Inc.
+RGTI # Rigetti Computing, Inc.
+QBTS # D-Wave Quantum Inc.
+QUBT # Quantum Computing Inc.

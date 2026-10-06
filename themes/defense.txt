@@ -1,0 +1,11 @@
+# Defense — 7 tickers
+# The largest US defense contractors.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/defense.txt
+
+LMT  # Lockheed Martin Corporation
+RTX  # RTX Corporation
+NOC  # Northrop Grumman Corporation
+GD   # General Dynamics Corporation
+LHX  # L3Harris Technologies, Inc.
+HII  # Huntington Ingalls Industries, Inc.
+LDOS # Leidos Holdings, Inc.

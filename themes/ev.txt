@@ -1,0 +1,10 @@
+# Electric vehicles — 6 tickers
+# EV makers listed in the US.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/ev.txt
+
+TSLA # Tesla, Inc.
+RIVN # Rivian Automotive, Inc.
+LCID # Lucid Group, Inc.
+NIO  # NIO Inc.
+XPEV # XPeng Inc.
+LI   # Li Auto Inc.

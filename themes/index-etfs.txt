@@ -1,0 +1,13 @@
+# Core index ETFs — 9 tickers
+# The biggest broad-market index ETFs.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/index-etfs.txt
+
+SPY  # State Street SPDR S&P 500 ETF Trust
+VOO  # Vanguard S&P 500 ETF
+IVV  # iShares Core S&P 500 ETF
+VTI  # Vanguard Morningstar Total Stock Market ETF
+QQQ  # Invesco QQQ Trust, Series 1
+DIA  # State Street SPDR Dow Jones Industrial Average ETF Trust
+IWM  # iShares Russell 2000 Index Fund
+VEA  # Vanguard FTSE Developed Markets ETF
+VXUS # Vanguard Total International Stock ETF

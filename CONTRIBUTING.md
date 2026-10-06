@@ -14,8 +14,9 @@ By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
   request* form, or start a thread in
   [Discussions](https://github.com/oliverbrown/stock_screener/discussions)
   if it's more of a question or an open-ended idea.
-- **Share a saved screen** — a new entry for [`screens.toml`](screens.toml)
-  is an easy first contribution.
+- **Share a saved screen or theme list** — a new entry for
+  [`screens.toml`](screens.toml) or a list in [`themes/`](themes) is an easy
+  first contribution.
 - **Report a security problem** — see [SECURITY.md](SECURITY.md); please
   don't open a public issue.
 
@@ -42,6 +43,7 @@ The test suite is offline and takes a few seconds.
 | `ticker_sources.py` | Live index / exchange ticker sources |
 | `build_ticker_lists.py` | Writes reference ticker lists to `ticker-lists/` |
 | `screens.toml` | Bundled saved screens |
+| `themes/` | Hand-picked theme ticker lists (FAANG, Mag 7, meme, …) |
 | `run-screener.sh` | Example runner script |
 | `tests/` | Offline tests; `tests/fake_yahoo.py` fakes Yahoo and counts requests |
 

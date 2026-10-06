@@ -1,0 +1,10 @@
+# Big US banks — 6 tickers
+# The six largest US banks.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/big-banks.txt
+
+JPM # JP Morgan Chase & Co.
+BAC # Bank of America Corporation
+WFC # Wells Fargo & Company
+C   # Citigroup, Inc.
+GS  # Goldman Sachs Group, Inc. (The)
+MS  # Morgan Stanley

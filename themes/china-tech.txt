@@ -1,0 +1,10 @@
+# China tech — 6 tickers
+# US-listed Chinese internet companies (ADRs).
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/china-tech.txt
+
+BABA # Alibaba Group Holding Limited
+PDD  # PDD Holdings Inc.
+JD   # JD.com, Inc.
+BIDU # Baidu, Inc.
+NTES # NetEase, Inc.
+TME  # Tencent Music Entertainment Group

@@ -1,0 +1,15 @@
+# Sector SPDR ETFs — 11 tickers
+# The 11 Select Sector SPDR ETFs (S&P 500 by sector).
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/sector-etfs.txt
+
+XLK  # State Street Technology Select Sector SPDR ETF
+XLF  # State Street Financial Select Sector SPDR ETF
+XLV  # State Street Health Care Select Sector SPDR ETF
+XLE  # State Street Energy Select Sector SPDR ETF
+XLI  # State Street Industrial Select Sector SPDR ETF
+XLY  # State Street Consumer Discretionary Select Sector SPDR ETF
+XLP  # State Street Consumer Staples Select Sector SPDR ETF
+XLU  # State Street Utilities Select Sector SPDR ETF
+XLB  # State Street Materials Select Sector SPDR ETF
+XLRE # State Street Real Estate Select Sector SPDR ETF
+XLC  # State Street Communication Services Select Sector SPDR ETF

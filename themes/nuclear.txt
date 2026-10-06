@@ -1,0 +1,12 @@
+# Nuclear power — 8 tickers
+# Utilities, reactor developers and uranium suppliers.
+# Hand-picked, not an index: edit freely. Use with: python3 stock_screener.py --tickers-file themes/nuclear.txt
+
+CEG  # Constellation Energy Corporation
+VST  # Vistra Corp.
+OKLO # Oklo Inc.
+SMR  # NuScale Power Corporation
+CCJ  # Cameco Corporation
+NNE  # Nano Nuclear Energy Inc.
+LEU  # Centrus Energy Corp.
+BWXT # BWX Technologies, Inc.
